@@ -49,6 +49,26 @@ readonly EXIT_INVALID_ARGUMENT=2
 readonly EXIT_PREFLIGHT_FAILED=20
 readonly EXIT_CUTOVER_FAILED=30
 
+# Preserve the selected network on Android redeploys that omit this option.
+configure_tunnel_subnet() {
+    if [ -z "${CSQTT_TUN_SUBNET:-}" ] && [ -f "$CSQTT_ENV_FILE" ]; then
+        CSQTT_TUN_SUBNET="$(sed -n 's/^CSQTT_TUN_SUBNET=//p' "$CSQTT_ENV_FILE" | tail -n 1)"
+    fi
+    CSQTT_TUN_SUBNET="${CSQTT_TUN_SUBNET:-10.66.67.0/24}"
+    local a b c
+    if [[ ! "$CSQTT_TUN_SUBNET" =~ ^([0-9]{1,3}\.){3}0/24$ ]]; then
+        die "CSQTT_TUN_SUBNET должен быть адресом частной сети .0/24"
+    fi
+    IFS='./' read -r a b c _ <<< "$CSQTT_TUN_SUBNET"
+    a=$((10#$a)); b=$((10#$b)); c=$((10#$c))
+    if (( a > 255 || b > 255 || c > 255 )) ||
+       ! (( a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168) )); then
+        die "CSQTT_TUN_SUBNET должен быть частной IPv4-сетью /24"
+    fi
+    CSQTT_TUN_SUBNET="$a.$b.$c.0/24"
+    export CSQTT_TUN_SUBNET
+}
+
 SYSTEMD_NEEDS_RELOAD=0
 DEPLOY_PHASE="initial"
 DOCKER_CONTEXT_DIR=""
@@ -318,7 +338,7 @@ fw_add_input_tcp() {
 }
 
 fw_add_forward() {
-    ipt_add_or_ensure filter INPUT -i "$CSQTT_IFACE" -s "10.66.67.0/24" -m comment --comment "$IPT_COMMENT" -j ACCEPT || \
+    ipt_add_or_ensure filter INPUT -i "$CSQTT_IFACE" -s "${CSQTT_TUN_SUBNET}" -m comment --comment "$IPT_COMMENT" -j ACCEPT || \
         die "Не удалось установить INPUT -i $CSQTT_IFACE"
     ipt_add_or_ensure filter FORWARD -i "$CSQTT_IFACE" -m comment --comment "$IPT_COMMENT" -j ACCEPT || \
         die "Не удалось установить FORWARD -i $CSQTT_IFACE"
@@ -384,12 +404,12 @@ cleanup_csqtt_netfilter_rules() {
         done
     done
     wan="$(detect_wan_interface 2>/dev/null || true)"
-    [ -n "$wan" ] && ipt_del_repeat nat POSTROUTING -s 10.66.67.0/24 -o "$wan" -j MASQUERADE
-    ipt_del_repeat nat POSTROUTING -s 10.66.67.0/24 ! -o "$CSQTT_IFACE" -j MASQUERADE
-    ipt_del_repeat filter FORWARD -s 10.66.67.0/24 -j ACCEPT
-    ipt_del_repeat filter FORWARD -d 10.66.67.0/24 -j ACCEPT
-    ipt_del_repeat mangle FORWARD -s 10.66.67.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    ipt_del_repeat mangle FORWARD -d 10.66.67.0/24 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    [ -n "$wan" ] && ipt_del_repeat nat POSTROUTING -s "${CSQTT_TUN_SUBNET}" -o "$wan" -j MASQUERADE
+    ipt_del_repeat nat POSTROUTING -s "${CSQTT_TUN_SUBNET}" ! -o "$CSQTT_IFACE" -j MASQUERADE
+    ipt_del_repeat filter FORWARD -s "${CSQTT_TUN_SUBNET}" -j ACCEPT
+    ipt_del_repeat filter FORWARD -d "${CSQTT_TUN_SUBNET}" -j ACCEPT
+    ipt_del_repeat mangle FORWARD -s "${CSQTT_TUN_SUBNET}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    ipt_del_repeat mangle FORWARD -d "${CSQTT_TUN_SUBNET}" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
     # Старые native nft-таблицы удаляем параллельно и с коротким лимитом.
     # Это не вызывает дорогой `nft list ruleset`.
@@ -410,7 +430,7 @@ cleanup_csqtt_proxy_policy() {
     local _
     for _ in 1 2 3 4; do ip -4 rule del fwmark 0x7531/0x7531 priority 30001 table 30001 >/dev/null 2>&1 || break; done
     for _ in 1 2 3 4; do ip -4 rule del fwmark 0x422 priority 1066 table 1066 >/dev/null 2>&1 || break; done
-    for _ in 1 2 3 4; do ip -4 rule del from 10.66.67.0/24 priority 1066 table 1066 >/dev/null 2>&1 || break; done
+    for _ in 1 2 3 4; do ip -4 rule del from "${CSQTT_TUN_SUBNET}" priority 1066 table 1066 >/dev/null 2>&1 || break; done
     ip -4 route flush table 30001 >/dev/null 2>&1 || true
     ip -4 route flush table 1066 >/dev/null 2>&1 || true
     ip -4 route flush cache >/dev/null 2>&1 || true
@@ -630,7 +650,7 @@ setup_nat_and_firewall() {
     iface=$(detect_wan_interface)
 
     if [ -z "$iface" ]; then
-        die "Не удалось определить WAN-интерфейс для NAT подсети 10.66.67.0/24"
+        die "Не удалось определить WAN-интерфейс для NAT подсети ${CSQTT_TUN_SUBNET}"
     fi
     ip link show "$iface" >/dev/null 2>&1 || die "Определённый WAN-интерфейс $iface не существует"
 
@@ -643,11 +663,11 @@ setup_nat_and_firewall() {
 
     fw_add_forward
 
-    fw_add_masquerade "$iface" "10.66.67.0/24"
+    fw_add_masquerade "$iface" "${CSQTT_TUN_SUBNET}"
     
-    fw_add_mss_clamping "10.66.67.0/24"
+    fw_add_mss_clamping "${CSQTT_TUN_SUBNET}"
 
-    echo "✓ NAT: MASQUERADE на $iface для 10.66.67.0/24"
+    echo "✓ NAT: MASQUERADE на $iface для ${CSQTT_TUN_SUBNET}"
     echo "✓ Порты: ${PEER_PORT}/udp(PEER), ${SSH_PORT}/tcp(SSH), ${WEB_PORT}/tcp(WEB), ${LE_HTTP_PORT}/tcp(LE)"
     echo "✓ TCP MSS Clamping включен"
 }
@@ -663,7 +683,7 @@ WEB_PORT="$WEB_PORT"
 LE_HTTP_PORT="$LE_HTTP_PORT"
 CSQTT_IFACE="$CSQTT_IFACE"
 IPT_COMMENT="$IPT_COMMENT"
-SUBNET="10.66.67.0/24"
+SUBNET="${CSQTT_TUN_SUBNET}"
 XT_WAIT="$XT_WAIT"
 
 command -v ip >/dev/null 2>&1 || exit 20
@@ -784,6 +804,8 @@ setup_csqtt_environment() {
     fi
     install -m 0600 "$UPLOAD_ENV_FILE" "$CSQTT_ENV_FILE" || \
         die "Не удалось активировать загруженную WEB-конфигурацию"
+    sed -i '/^CSQTT_TUN_SUBNET=/d' "$CSQTT_ENV_FILE"
+    printf 'CSQTT_TUN_SUBNET=%s\n' "$CSQTT_TUN_SUBNET" >> "$CSQTT_ENV_FILE"
     install -m 0600 "$UPLOAD_OVERRIDES_FILE" "$CSQTT_DEPLOY_OVERRIDES_FILE" || \
         die "Не удалось активировать загруженную deploy-конфигурацию"
     echo "✓ Конфигурация запуска установлена безопасным EnvironmentFile"
@@ -1746,6 +1768,7 @@ main() {
     mkdir -p "$(dirname "$LOG_FILE")"
     echo "=== CSQTT Installer v${SCRIPT_VERSION} — $(date) ===" >> "$LOG_FILE"
 
+    configure_tunnel_subnet
     case "$action" in
         status|--status|-s)       do_status ;;
         uninstall|--uninstall|-u)

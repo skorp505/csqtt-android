@@ -419,8 +419,12 @@ impl Dispatcher {
 
     pub fn return_packet(&self, packet: PacketBuf) {
         if crate::stream_proxy::is_frame(packet.as_slice()) {
-            if let Some(sender) = self.proxy_frames.get() {
-                let _ = sender.try_send(packet.as_slice().to_vec());
+            if let Some(sender) = self.proxy_frames.get()
+                && sender.try_send(packet.as_slice().to_vec()).is_err()
+            {
+                // These are TCP bytes, not independently discardable IP packets.
+                // Terminate the tunnel rather than silently corrupting every stream.
+                self.cancel.cancel();
             }
             return;
         }
@@ -474,10 +478,13 @@ impl Dispatcher {
         packet.as_mut_slice().copy_from_slice(frame);
         let result = worker
             .priority
-            .force_send(packet)
+            .try_send(packet)
             .map_err(|_| anyhow::anyhow!("CSQTT transport queue is unavailable"));
         if kind == crate::stream_proxy::CLOSE || result.is_err() {
             routes.remove(&stream_id);
+        }
+        if result.is_err() {
+            self.cancel.cancel();
         }
         result
     }

@@ -11,8 +11,6 @@ use crate::{
 use std::net::Ipv4Addr;
 
 pub const TUN_IFACE: &str = "csqtt1";
-pub const TUN_SUBNET: &str = "10.66.67.0/24";
-const SUBNET_PREFIX: [u8; 3] = [10, 66, 67];
 
 pub type SessionId = u64;
 pub type RegistrationId = u64;
@@ -265,7 +263,7 @@ impl Default for RouteTable {
 
 #[inline(always)]
 fn route_index(ip: [u8; 4]) -> Option<usize> {
-    (ip[..3] == SUBNET_PREFIX).then_some(ip[3] as usize)
+    (ip[..3] == crate::net_setup::network().prefix).then_some(ip[3] as usize)
 }
 
 pub fn parse_ipv4(value: &str) -> Option<[u8; 4]> {

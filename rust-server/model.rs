@@ -65,6 +65,8 @@ pub const DEFAULT_LOCAL_PROXY_PORT: u16 = 45000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalProxyProfile {
+    #[serde(default = "default_proxy_host")]
+    pub host: String,
     pub id: String,
     pub name: String,
     pub port: u16,
@@ -72,6 +74,10 @@ pub struct LocalProxyProfile {
     pub username: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub password: String,
+}
+
+pub fn default_proxy_host() -> String {
+    "127.0.0.1".to_owned()
 }
 
 impl LocalProxyProfile {
@@ -166,6 +172,7 @@ impl<'de> serde::Deserialize<'de> for LocalProxyState {
                 .to_owned();
             let id = LocalProxyProfile::new_id();
             let profile = LocalProxyProfile {
+                host: default_proxy_host(),
                 id: id.clone(),
                 name: format!("SOCKS5 :{port}"),
                 port: if port == 0 {
@@ -545,7 +552,8 @@ pub fn get_next_ip(db: &Database) -> Option<String> {
     for i in 2..=250u8 {
         buf.clear();
         use std::fmt::Write;
-        let _ = write!(buf, "10.66.67.{i}");
+        let [a, b, c] = crate::net_setup::network().prefix;
+        let _ = write!(buf, "{a}.{b}.{c}.{i}");
         let is_used = db.devices.values().any(|d| d.ip == buf);
         if !is_used {
             return Some(buf);
@@ -675,6 +683,15 @@ fn open_database_connection(config_dir: &Path) -> Result<Connection> {
     connection
         .execute_batch(DATABASE_SCHEMA)
         .with_context(|| format!("schema {}", path.display()))?;
+    let has_host: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_proxy_profiles') WHERE name = 'host')",
+        [], |row| row.get(0),
+    )?;
+    if !has_host {
+        connection.execute_batch(
+            "ALTER TABLE local_proxy_profiles ADD COLUMN host TEXT NOT NULL DEFAULT '127.0.0.1'",
+        )?;
+    }
     #[cfg(unix)]
     secure_database_file_permissions(config_dir)?;
     Ok(connection)
@@ -852,14 +869,15 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO UPDATE SET
                     sort_order = excluded.sort_order,
                     name = excluded.name,
                     port = excluded.port,
                     username = excluded.username,
-                    password = excluded.password",
+                    password = excluded.password,
+                    host = excluded.host",
             )
             .context("prepare local proxy profiles insert")?;
         for (sort_order, profile) in db.local_proxy.profiles.iter().enumerate() {
@@ -871,6 +889,7 @@ fn write_database_snapshot(connection: &mut Connection, db: &Database) -> Result
                     profile.port,
                     profile.username,
                     profile.password,
+                    profile.host,
                 ])
                 .context("write local proxy profile")?;
         }
@@ -982,13 +1001,14 @@ fn read_database_snapshot(config_dir: &Path) -> Result<Database> {
     {
         let mut select = connection
             .prepare(
-                "SELECT id, name, port, username, password
+                "SELECT id, name, port, username, password, host
                  FROM local_proxy_profiles ORDER BY sort_order",
             )
             .context("prepare local proxy profiles select")?;
         let mut rows = select.query([]).context("read local proxy profiles")?;
         while let Some(row) = rows.next()? {
             db.local_proxy.profiles.push(LocalProxyProfile {
+                host: row.get(5).context("read profile host")?,
                 id: row.get(0).context("read profile id")?,
                 name: row.get(1).context("read profile name")?,
                 port: row.get(2).context("read profile port")?,
@@ -1178,8 +1198,8 @@ fn import_legacy_database_rows(connection: &mut Connection, legacy: &Database) -
     {
         let mut insert = transaction
             .prepare(
-                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO local_proxy_profiles (id, sort_order, name, port, username, password, host)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(id) DO NOTHING",
             )
             .context("prepare legacy proxy profiles import")?;
@@ -1192,6 +1212,7 @@ fn import_legacy_database_rows(connection: &mut Connection, legacy: &Database) -
                     profile.port,
                     profile.username,
                     profile.password,
+                    profile.host,
                 ])
                 .with_context(|| format!("merge legacy proxy profile {}", profile.id))?;
         }
@@ -1385,6 +1406,24 @@ mod tests {
 
         assert_eq!(restored.dns, database.dns);
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn proxy_host_migrates_from_old_sqlite_and_survives_restart() {
+        use super::{Connection, DATABASE_FILE, DATABASE_SCHEMA, random_token};
+        let directory = std::env::temp_dir().join(format!("csqtt-proxy-host-{}", random_token(12)));
+        std::fs::create_dir_all(&directory).unwrap();
+        let connection = Connection::open(directory.join(DATABASE_FILE)).unwrap();
+        connection.execute_batch(DATABASE_SCHEMA).unwrap();
+        connection.execute("INSERT INTO local_proxy_profiles(id,sort_order,name,port) VALUES ('old',0,'Old',45000)", []).unwrap();
+        drop(connection);
+        let mut db = load_database(&directory).unwrap();
+        assert_eq!(db.local_proxy.profiles[0].host, "127.0.0.1");
+        db.local_proxy.profiles[0].host = "192.168.88.12".to_owned();
+        save_database(&directory, &db).unwrap();
+        let restored = load_database(&directory).unwrap();
+        assert_eq!(restored.local_proxy.profiles[0].host, "192.168.88.12");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

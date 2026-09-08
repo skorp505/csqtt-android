@@ -1888,6 +1888,7 @@ async fn async_main() -> Result<()> {
     }
 
     let args = Args::parse();
+    net_setup::initialize()?;
 
     if args.start {
         return run_systemctl("start");
@@ -1941,6 +1942,16 @@ async fn async_main() -> Result<()> {
     }
 
     let mut db = load_database(&args.config_dir)?;
+    // Preserve device identities and host numbers when the operator changes /24.
+    let mut assigned = std::collections::HashSet::new();
+    for device in db.devices.values_mut() {
+        let ip: std::net::Ipv4Addr = device.ip.parse().context("invalid saved device IP")?;
+        let host = ip.octets()[3];
+        if !(2..=250).contains(&host) || !assigned.insert(host) {
+            bail!("saved device IPs cannot be migrated to the configured /24");
+        }
+        device.ip = net_setup::network().client_ip(host);
+    }
     db.admin_id.clear();
     db.bot_token.clear();
     db.web_sessions.clear();
@@ -2427,7 +2438,7 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
         };
         if let Some(route) = current {
             if route.is_alive() && route.matches(&profile) {
-                if !proxy_route::port_is_listening(profile.port).await {
+                if !proxy_route::port_is_listening(&profile.host, profile.port).await {
                     *write_unpoison(&app.proxy_health_error) =
                         Some(format!("Порт {} не отвечает", profile.port));
                     app.proxy_port_listening
@@ -2469,7 +2480,7 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             continue;
         }
 
-        let listening = proxy_route::port_is_listening(profile.port).await;
+        let listening = proxy_route::port_is_listening(&profile.host, profile.port).await;
         app.proxy_port_listening
             .store(listening, std::sync::atomic::Ordering::Release);
         if !listening {
@@ -2505,8 +2516,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
             "INFO",
             "PROXY",
             &format!(
-                "Connecting SOCKS5 forwarder to local SOCKS5 127.0.0.1:{}...",
-                profile.port
+                "Connecting SOCKS5 forwarder to {}:{}...",
+                profile.host, profile.port
             ),
         );
         let proxy_log_app = app.clone();
@@ -2522,8 +2533,8 @@ async fn local_proxy_monitor_loop(app: Arc<App>) {
                     "INFO",
                     "PROXY",
                     &format!(
-                        "Local SOCKS5 route 127.0.0.1:{} is active (TCP and UDP)",
-                        profile.port
+                        "SOCKS5 route {}:{} is active (TCP and UDP)",
+                        profile.host, profile.port
                     ),
                 );
                 wait = Some(PORT_CHECK);

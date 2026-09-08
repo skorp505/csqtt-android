@@ -72,6 +72,15 @@ fn encode_frame(kind: u8, stream_id: u64, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+fn deliver_inbound(streams: &mut HashMap<u64, mpsc::Sender<Inbound>>, id: u64, event: Inbound) {
+    if let Some(sender) = streams.get(&id)
+        && sender.try_send(event).is_err()
+    {
+        // Close after the queued prefix; never deliver bytes following the lost frame.
+        streams.remove(&id);
+    }
+}
+
 pub async fn start(
     bind: &str,
     dispatcher: Arc<Dispatcher>,
@@ -107,9 +116,8 @@ pub async fn start(
                 CLOSE => Inbound::Closed,
                 _ => continue,
             };
-            if let Some(sender) = inbound_streams.lock().await.get(&frame.stream_id).cloned() {
-                let _ = sender.try_send(event);
-            }
+            let mut streams = inbound_streams.lock().await;
+            deliver_inbound(&mut streams, frame.stream_id, event);
         }
     });
 
@@ -257,6 +265,75 @@ mod tests {
         assert_eq!(frame.stream_id, 42);
         assert_eq!(frame.payload, b"payload");
         assert!(!is_frame(b"ordinary IP packet"));
+    }
+
+    #[tokio::test]
+    async fn inbound_overflow_closes_only_the_affected_stream() {
+        let mut streams = HashMap::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        let (other, _other_rx) = mpsc::channel(1);
+        streams.insert(1, tx);
+        streams.insert(2, other);
+        deliver_inbound(&mut streams, 1, Inbound::Data(b"prefix".to_vec()));
+        deliver_inbound(&mut streams, 1, Inbound::Data(b"lost".to_vec()));
+        deliver_inbound(&mut streams, 1, Inbound::Data(b"suffix".to_vec()));
+        assert!(streams.contains_key(&2));
+        assert!(!streams.contains_key(&1));
+        assert!(matches!(rx.recv().await, Some(Inbound::Data(bytes)) if bytes == b"prefix"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_queue_overflow_never_evicts_earlier_bytes() {
+        let pool = PacketPool::new(32);
+        let cancel = CancellationToken::new();
+        let (dispatcher, _) = Dispatcher::start(
+            "127.0.0.1:0",
+            None,
+            pool.clone(),
+            Arc::new(Stats::default()),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        let (latency, _latency_rx) = packet_channel(1, true);
+        let (priority, priority_rx) = packet_channel(1, true);
+        let (bulk, _bulk_rx) = packet_channel(1, true);
+        dispatcher.register(WorkerChannels {
+            id: 1,
+            incarnation_id: 1,
+            turn_path: Arc::from("test"),
+            latency,
+            priority,
+            bulk,
+        });
+        dispatcher
+            .send_proxy_frame(&pool, &encode_frame(OPEN, 1, b"target"))
+            .unwrap();
+        assert!(
+            dispatcher
+                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"later bytes"))
+                .is_err()
+        );
+        let first = priority_rx.try_recv().unwrap();
+        assert_eq!(parse_frame(first.as_slice()).unwrap().kind, OPEN);
+        assert!(
+            dispatcher
+                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"must stay closed"))
+                .is_err()
+        );
+
+        let (tx, _rx) = mpsc::channel(1);
+        dispatcher.set_proxy_frame_sender(tx).unwrap();
+        for _ in 0..2 {
+            let bytes = encode_frame(DATA, 1, b"response");
+            let mut packet = pool.acquire();
+            packet.set_read_len(bytes.len()).unwrap();
+            packet.as_mut_slice().copy_from_slice(&bytes);
+            dispatcher.return_packet(packet);
+        }
+        assert!(cancel.is_cancelled());
+        dispatcher.shutdown().await;
     }
 
     #[tokio::test]

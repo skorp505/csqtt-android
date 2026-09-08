@@ -1449,7 +1449,7 @@ mod linux {
     fn allowed_client(client: SocketAddrV4) -> bool {
         static SUBNET: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
         let prefix = SUBNET.get_or_init(|| {
-            crate::tun_device::TUN_SUBNET
+            crate::net_setup::tun_subnet()
                 .split_once('/')
                 .and_then(|(base, bits)| {
                     let base: Ipv4Addr = base.parse().ok()?;

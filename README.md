@@ -47,6 +47,10 @@
 
 Подробный список изменений находится в [CHANCHELOG.md](CHANCHELOG.md).
 
+Изменения текущих исходников: [запросы upstream и исправления](docs/UPSTREAM_REQUESTS.md).
+Для ручной установки, собственной подсети, SOCKS5 host и интеграции внешней
+панели см. [Server administration/API](docs/SERVER_ADMIN.md).
+
 ## Сборка Android
 
 Требуются JDK 17, Android SDK 37, Android NDK r28c и Rust 1.97.1.

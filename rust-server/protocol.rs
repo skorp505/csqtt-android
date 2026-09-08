@@ -4790,7 +4790,7 @@ pub async fn flush_traffic(app: &Arc<App>) {
                     down_bytes: password.down_bytes,
                 },
             );
-            let device_id = password.device_id.clone();
+            let device_id = lock_unpoison(&session.device_id).clone();
             if let Some(device) = db.devices.get_mut(&device_id) {
                 device.up_bytes = device.up_bytes.saturating_add(up as i64);
                 device.down_bytes = device.down_bytes.saturating_add(down as i64);

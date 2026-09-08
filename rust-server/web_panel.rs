@@ -112,6 +112,7 @@ fn validate_proxy_profile_name(name: &str) -> Result<(), &'static str> {
 
 #[derive(Serialize)]
 struct ClientInfo {
+    devices: Vec<serde_json::Value>,
     password: String,
     down: i64,
     up: i64,
@@ -983,6 +984,7 @@ async fn settings_get(State(state): State<WebState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "main_password": db.main_password,
         "dns_primary": primary,
+        "tunnel_subnet": crate::net_setup::tun_subnet(),
         "dns_secondary": secondary,
         "auto_restart_interval_hours": db.auto_restart_interval_hours(),
         "restart_required": db.main_password != state.app.startup_main_password
@@ -1088,6 +1090,14 @@ async fn settings_post(
     Json(serde_json::json!({ "restart_required": restart_required })).into_response()
 }
 
+fn client_devices(db: &crate::model::Database, password: &str) -> Vec<serde_json::Value> {
+    db.devices
+        .values()
+        .filter(|d| d.bound_password == password)
+        .map(|d| serde_json::json!({"device_id": d.device_id, "ip": d.ip}))
+        .collect()
+}
+
 async fn clients_get(State(state): State<WebState>) -> impl IntoResponse {
     let db = state.app.db.read().await;
     let mut session_counts = std::collections::HashMap::new();
@@ -1101,6 +1111,7 @@ async fn clients_get(State(state): State<WebState>) -> impl IntoResponse {
         .passwords
         .iter()
         .map(|(password, entry)| ClientInfo {
+            devices: client_devices(&db, password),
             password: password.clone(),
             down: entry.down_bytes,
             up: entry.up_bytes,
@@ -1136,6 +1147,7 @@ async fn clients_get(State(state): State<WebState>) -> impl IntoResponse {
         }
 
         list.push(ClientInfo {
+            devices: client_devices(&db, &db.main_password),
             password: db.main_password.clone(),
             down: db.main_down_bytes + session_down,
             up: db.main_up_bytes + session_up,
@@ -1687,6 +1699,8 @@ async fn logs_clear(State(state): State<WebState>) -> Response {
 
 #[derive(Deserialize)]
 struct ProfileRequest {
+    #[serde(default = "crate::model::default_proxy_host")]
+    host: String,
     #[serde(default)]
     name: String,
     port: u16,
@@ -1712,6 +1726,7 @@ async fn local_proxy_get(State(state): State<WebState>) -> impl IntoResponse {
             serde_json::json!({
                 "id": p.id,
                 "name": p.name,
+                "host": p.host,
                 "port": p.port,
                 "username": p.username,
                 "password": p.password,
@@ -1742,6 +1757,7 @@ async fn local_proxy_create(
         request.port
     };
     let profile = crate::model::LocalProxyProfile {
+        host: request.host.clone(),
         id: crate::model::LocalProxyProfile::new_id(),
         name: if request.name.is_empty() {
             format!("SOCKS5 :{port}")
@@ -1773,7 +1789,7 @@ async fn local_proxy_create(
         "PROXY",
         &format!("SOCKS5 profile created: {id}"),
     );
-    let port_listening = crate::proxy_route::port_is_listening(port).await;
+    let port_listening = crate::proxy_route::port_is_listening(&request.host, port).await;
     Json(serde_json::json!({ "id": id, "port_listening": port_listening })).into_response()
 }
 
@@ -1791,6 +1807,7 @@ async fn local_proxy_update(
         request.port
     };
     let temp_profile = crate::model::LocalProxyProfile {
+        host: request.host.clone(),
         id: id.clone(),
         name: request.name.clone(),
         port,
@@ -1809,6 +1826,7 @@ async fn local_proxy_update(
         if !request.name.is_empty() {
             profile.name = request.name;
         }
+        profile.host = request.host.clone();
         profile.port = port;
         profile.username = request.username;
         profile.password = request.password;
@@ -1826,7 +1844,7 @@ async fn local_proxy_update(
         "PROXY",
         &format!("SOCKS5 profile updated: {id}"),
     );
-    let port_listening = crate::proxy_route::port_is_listening(port).await;
+    let port_listening = crate::proxy_route::port_is_listening(&request.host, port).await;
     Json(serde_json::json!({ "updated": true, "port_listening": port_listening })).into_response()
 }
 
@@ -3155,6 +3173,7 @@ const PANEL_HTML: &str = r##"
     <dialog id="profileDlg">
         <h2 id="profileDlgTitle" style="font-size: 18px; margin-bottom: 18px;">Новый профиль</h2>
         <div class="input-group"><label for="profileDlgName">Имя</label><input id="profileDlgName" maxlength="64" placeholder="3x-ui VLESS"></div>
+        <div class="input-group"><label for="profileDlgHost">IPv4-адрес SOCKS5</label><input id="profileDlgHost" value="127.0.0.1" placeholder="192.168.1.10"></div>
         <div class="input-group"><label for="profileDlgPort">Порт SOCKS5</label><input type="number" id="profileDlgPort" min="1" max="65535" value="45000" inputmode="numeric"></div>
         <div class="input-group"><label for="profileDlgUser">Логин (необязательно)</label><input id="profileDlgUser" maxlength="255" autocomplete="off"></div>
         <div class="input-group" style="margin-bottom: 0;"><label for="profileDlgPass">Пароль (необязательно)</label><input type="password" id="profileDlgPass" maxlength="255" autocomplete="new-password"></div>
@@ -3554,7 +3573,7 @@ const PANEL_HTML: &str = r##"
                         badge = `<span style="font-size:11px;font-weight:600;color:#f59e0b;margin-left:6px;">Подключение...</span>`;
                     }
                 }
-                let meta = p.username ? `${p.port} · ${p.username}` : `${p.port}`;
+                let meta = `${esc(p.host || '127.0.0.1')}:${p.port}` + (p.username ? ` · ${esc(p.username)}` : '');
                 if (isActive) {
                     if (route_active) {
                         meta += ` · ${tcp_sessions} TCP · ${udp_flows} UDP`;
@@ -3623,6 +3642,7 @@ const PANEL_HTML: &str = r##"
                 saveBtn.textContent = 'Сохранить';
                 document.getElementById('profileDlgName').value = p.name;
                 document.getElementById('profileDlgPort').value = p.port;
+                document.getElementById('profileDlgHost').value = p.host || '127.0.0.1';
                 document.getElementById('profileDlgUser').value = p.username || '';
                 document.getElementById('profileDlgPass').value = p.password || '';
             } else {
@@ -3630,6 +3650,7 @@ const PANEL_HTML: &str = r##"
                 saveBtn.textContent = 'Создать';
                 document.getElementById('profileDlgName').value = '';
                 document.getElementById('profileDlgPort').value = '45000';
+                document.getElementById('profileDlgHost').value = '127.0.0.1';
                 document.getElementById('profileDlgUser').value = '';
                 document.getElementById('profileDlgPass').value = '';
             }
@@ -3648,7 +3669,8 @@ const PANEL_HTML: &str = r##"
             if (password && !username) {
                 showToast('Для пароля SOCKS5 укажите логин', 'error'); return;
             }
-            const body = JSON.stringify({ name, port, username, password });
+            const host = document.getElementById('profileDlgHost').value.trim();
+            const body = JSON.stringify({ name, host, port, username, password });
             const btn = document.getElementById('profileDlgSave');
             profileDlgSaving = true;
             btn.disabled = true;
@@ -3883,8 +3905,8 @@ const PANEL_HTML: &str = r##"
             document.getElementById('edit_vk_hashes').classList.remove('is-invalid');
             toggleEditWdttFields();
 
-            document.getElementById('edit_device_info').textContent = c.device_id || '—';
-            document.getElementById('edit_ip_info').textContent = c.ip || '—';
+            document.getElementById('edit_device_info').textContent = c.devices?.length ? c.devices.map(d => d.device_id).join(', ') : (c.device_id || '—');
+            document.getElementById('edit_ip_info').textContent = c.devices?.length ? c.devices.map(d => d.ip).join(', ') : (c.ip || '—');
             document.getElementById('edit_traffic_info').textContent = `↑ ${size(c.up)} / ↓ ${size(c.down)}`;
             
             document.getElementById('edit_statusBtn').innerHTML = c.active ? 'Выкл' : 'Вкл';

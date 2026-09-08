@@ -60,7 +60,7 @@ impl ProxyRoute {
     pub async fn connect(config: &LocalProxyProfile, log: LogFn) -> Result<Arc<Self>> {
         validate_config(config)?;
         ensure_linux_platform()?;
-        if !port_is_listening(config.port).await {
+        if !port_is_listening(&config.host, config.port).await {
             bail!("SOCKS5 port {} is not listening", config.port);
         }
         verify_socks5_udp_associate(config).await?;
@@ -87,8 +87,8 @@ impl ProxyRoute {
         });
         spawn_rule_watchdog(port, route.cancel.clone(), log.clone());
         println!(
-            "[LOCAL-PROXY] SOCKS5 route ready on 127.0.0.1:{} via TPROXY port {}",
-            route.config.port, route.port
+            "[LOCAL-PROXY] SOCKS5 route ready on {}:{} via TPROXY port {}",
+            route.config.host, route.config.port, route.port
         );
         Ok(route)
     }
@@ -320,8 +320,11 @@ async fn stop_tproxy_child(mut child: Child) {
     }
 }
 
-pub(crate) async fn port_is_listening(port: u16) -> bool {
-    let target = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+pub(crate) async fn port_is_listening(host: &str, port: u16) -> bool {
+    let Ok(ip) = host.parse::<Ipv4Addr>() else {
+        return false;
+    };
+    let target = SocketAddr::from((ip, port));
     matches!(
         tokio::time::timeout(Duration::from_millis(1500), TcpStream::connect(target)).await,
         Ok(Ok(_))
@@ -340,6 +343,13 @@ async fn verify_socks5_udp_associate(config: &LocalProxyProfile) -> Result<()> {
 }
 
 pub fn validate_config(config: &LocalProxyProfile) -> Result<()> {
+    let host = config
+        .host
+        .parse::<Ipv4Addr>()
+        .context("SOCKS5 host must be an IPv4 address")?;
+    if host.is_unspecified() || host.is_multicast() || host.is_broadcast() {
+        bail!("SOCKS5 host must be a unicast IPv4 address");
+    }
     if config.port == 0 {
         bail!("SOCKS5 port must be in range 1-65535");
     }
@@ -372,7 +382,13 @@ pub(crate) async fn socks_command(
     command: u8,
     destination: SocketAddr,
 ) -> Result<(TcpStream, SocketAddr)> {
-    let proxy = SocketAddr::from((Ipv4Addr::LOCALHOST, config.port));
+    let proxy = SocketAddr::from((
+        config
+            .host
+            .parse::<Ipv4Addr>()
+            .context("invalid SOCKS5 host IPv4")?,
+        config.port,
+    ));
     let mut stream = tokio::time::timeout(SOCKS_COMMAND_TIMEOUT, TcpStream::connect(proxy))
         .await
         .context("local SOCKS5 connection timed out")??;
@@ -565,7 +581,7 @@ async fn tproxy_interception_present(port: u16) -> bool {
     let port_arg = port.to_string();
     let comment = tproxy_comment(port);
     let iface = crate::tun_device::TUN_IFACE;
-    let subnet = crate::tun_device::TUN_SUBNET;
+    let subnet = crate::net_setup::tun_subnet();
     for protocol in ["tcp", "udp"] {
         if !command_success(
             "iptables",
@@ -655,7 +671,7 @@ async fn add_tproxy_rules(port: u16) -> Result<()> {
                 "-i",
                 crate::tun_device::TUN_IFACE,
                 "-s",
-                crate::tun_device::TUN_SUBNET,
+                crate::net_setup::tun_subnet(),
                 "-p",
                 protocol,
                 "-m",
@@ -683,7 +699,7 @@ async fn add_tproxy_rules(port: u16) -> Result<()> {
             "-i",
             crate::tun_device::TUN_IFACE,
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "-m",
             "comment",
             "--comment",
@@ -704,7 +720,7 @@ async fn add_tproxy_rules(port: u16) -> Result<()> {
             "-i",
             crate::tun_device::TUN_IFACE,
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "-m",
             "comment",
             "--comment",
@@ -761,7 +777,7 @@ async fn remove_from_subnet_rule() {
             "rule",
             "del",
             "from",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "priority",
             LEGACY_POLICY_PRIORITY,
             "table",
@@ -781,7 +797,7 @@ async fn drop_new_flow_mark_rules() {
             "-D",
             "PREROUTING",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "-m",
             "conntrack",
             "--ctstate",
@@ -810,7 +826,7 @@ async fn cleanup_mark_rules() {
             "-D",
             "PREROUTING",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "-m",
             "comment",
             "--comment",
@@ -849,7 +865,7 @@ async fn cleanup_nat_exemption(tun_name: &str) {
                 "-D",
                 "POSTROUTING",
                 "-s",
-                crate::tun_device::TUN_SUBNET,
+                crate::net_setup::tun_subnet(),
                 "-o",
                 tun_name,
                 "-m",
@@ -890,7 +906,7 @@ async fn cleanup_legacy_quic_rule() {
             "-D",
             "FORWARD",
             "-s",
-            crate::tun_device::TUN_SUBNET,
+            crate::net_setup::tun_subnet(),
             "-p",
             "udp",
             "--dport",
@@ -1023,6 +1039,7 @@ mod tests {
 
     fn config() -> LocalProxyProfile {
         LocalProxyProfile {
+            host: crate::model::default_proxy_host(),
             id: "test".to_owned(),
             name: "Test".to_owned(),
             port: 45000,
@@ -1039,6 +1056,45 @@ mod tests {
         assert!(validate_config(&value).is_err());
         value.username = "user\nname".to_owned();
         assert!(validate_config(&value).is_err());
+    }
+
+    #[tokio::test]
+    async fn socks_command_connects_to_configured_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            socket.write_all(&[5, 0]).await.unwrap();
+            let mut request = [0; 10];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[..4], &[5, 3, 0, 1]);
+            socket
+                .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0x12, 0x34])
+                .await
+                .unwrap();
+        });
+        let mut profile = config();
+        profile.host = "127.0.0.2".to_owned();
+        profile.port = address.port();
+        let (_, relay) = super::socks_command(&profile, 3, "0.0.0.0:0".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(relay, "127.0.0.2:4660".parse().unwrap());
+        server.await.unwrap();
+        for host in [
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "localhost",
+            "127.0.0.1;id",
+        ] {
+            profile.host = host.to_owned();
+            assert!(validate_config(&profile).is_err(), "{host}");
+        }
     }
 
     #[test]

@@ -136,6 +136,20 @@ fn send_frame(app: &Arc<App>, session_id: u64, frame: Vec<u8>) -> Result<()> {
     )
 }
 
+fn enqueue_data(
+    streams: &dashmap::DashMap<(u64, u64), mpsc::Sender<StreamInput>>,
+    key: (u64, u64),
+    data: &[u8],
+) -> bool {
+    let overflow = streams
+        .get(&key)
+        .is_some_and(|sender| sender.try_send(StreamInput::Data(data.to_vec())).is_err());
+    if overflow {
+        streams.remove(&key);
+    }
+    overflow
+}
+
 pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Result<()> {
     let frame = parse_frame(payload).ok_or_else(|| anyhow::anyhow!("invalid proxy frame"))?;
     let key = (session_id, frame.stream_id);
@@ -177,8 +191,8 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
             if frame.payload.len() > MAX_DATA {
                 bail!("proxy data frame too large");
             }
-            if let Some(sender) = app.proxy_streams.get(&key) {
-                let _ = sender.try_send(StreamInput::Data(frame.payload.to_vec()));
+            if enqueue_data(&app.proxy_streams, key, frame.payload) {
+                send_frame(app, session_id, encode_frame(CLOSE, frame.stream_id, &[]))?;
             }
         }
         CLOSE => {
@@ -242,6 +256,18 @@ pub fn close_session(app: &Arc<App>, session_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn full_stream_queue_closes_without_delivering_a_suffix_after_a_gap() {
+        let streams = dashmap::DashMap::new();
+        let (tx, mut rx) = mpsc::channel(1);
+        streams.insert((1, 2), tx);
+        assert!(!enqueue_data(&streams, (1, 2), b"prefix"));
+        assert!(enqueue_data(&streams, (1, 2), b"lost"));
+        assert!(!enqueue_data(&streams, (1, 2), b"suffix"));
+        assert!(matches!(rx.recv().await, Some(StreamInput::Data(bytes)) if bytes == b"prefix"));
+        assert!(rx.recv().await.is_none());
+    }
 
     #[test]
     fn target_parser_accepts_domain_and_rejects_zero_port() {
