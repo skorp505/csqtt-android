@@ -1,7 +1,7 @@
 # Запросы upstream и правки нашего fork — 2026-09-08
 
 Источник: [issues amurcanov/csqtt](https://github.com/amurcanov/csqtt/issues).
-Ниже состояние исходников; публикация нового релиза и deploy ещё не выполнены.
+Ниже состояние исходников релиза `2.1.11`; live deploy выполняется отдельно.
 
 | Запрос | Реализация у нас |
 | --- | --- |
@@ -15,12 +15,42 @@
 | [#5](https://github.com/amurcanov/csqtt/issues/5), [#6: OpenWrt](https://github.com/amurcanov/csqtt/issues/6) | Уже есть отдельный beta-порт; остаются аппаратные проверки |
 | [#22: Windows](https://github.com/amurcanov/csqtt/issues/22), Linux из [#15](https://github.com/amurcanov/csqtt/issues/15) | Уже есть отдельный Wails desktop |
 
+## Остальные issues и повторная проверка
+
+Проверены все 24 issues upstream (#13 — PR), открытые и закрытые, и их
+комментарии. В наших репозиториях также проверены issues/PR; ниже конкретные
+границы выводов, а не обещание исправления любого внешнего отчёта.
+
+| Issue | Результат |
+| --- | --- |
+| #1: TURN готов, трафика нет | Один автор сообщил об исправлении через список исключений приложений; другие сообщения не содержат воспроизведения. У нас есть раздельная диагностика TURN/server handshake и тесты reconnect/epoch |
+| #2: sing-box | Архитектурное предложение, не дефект. Автоматической замены transport в 2.1.11 нет |
+| #3: Firefox login loop | У нас cookie Secure зависит от HTTPS-конфигурации, это покрыто тестом; конкретный Firefox mobile сценарий не воспроизведён |
+| #4: sudo под zsh и SSH key | У нас `rootCommand` сразу ставит `sudo -S`, глобальной замены нет; отдельный sudo password сохраняется в SSH-key режиме |
+| #7: domain/IP routing | Desktop поддерживает исключения доменов/IP/CIDR; на сервере поддержан внешний SOCKS5/xray. Это не новая domain routing функция Android |
+| #8: YouTube не работает при allowlist | Без device/network logs причину установить нельзя. Не помечено исправленным; проверены существующие настройки исключений и unit tests |
+| #9: Keenetic | Поддержка произвольного Keenetic не заявляется; нужен конкретный hardware/firmware target |
+| #11: Hydra Router Neo | Интеграция требует описания интерфейса/протокола Hydra; не реализована |
+| #14: обрывы после 2.1.5 | Нет логов и воспроизведения на нашем fork; не объявлено исправленным |
+| #15: captcha/mobile | Автор upstream предложил 2.1.9. Наши captcha cancel/auth/recovery проверены тестами; полевой отчёт не воспроизведён |
+| #16: регион VPS | Обсуждение ограничений выхода VPS, не программный дефект |
+| #22 и наш desktop #2 | Наш #2 содержит `DENIED:protocol_mismatch`. В upstream 2.1.9 GETCONF требует восьмое поле `CSQTT-WIRE-2/3`; у нашего fork семипольный контракт. Добавлено понятное сообщение с требованием совместимого server fork |
+
+Desktop/Android `2.1.11` предназначены для сервера `danusha2345/csqtt-android`.
+Совместимость с сервером `amurcanov/csqtt 2.1.9` не заявляется. Само присутствие
+Wails-клиента не доказывает устранение пользовательского отчёта #22: нужна
+проверка полного трафика на Windows. В релизе поставляются согласованные core,
+GUI, Wintun и server artifacts.
+
 Исправления review:
 
 - SOCKS5 DATA не вытесняет предыдущие байты из очереди. Переполнение закрывает
   stream, а переполнение общей transport-очереди останавливает туннель. Это
   устраняет продолжение TCP-потока после потерянного фрагмента из-за очереди;
   не является новым reliable transport поверх UDP.
+- SOCKS5 использует `CSQPX2` с offset каждого DATA-фрагмента: пропуск,
+  повтор или перестановка закрывают поток до передачи последующего фрагмента.
+  SOCKS5 требует клиента и сервера 2.1.11; старый `CSQPX1` не совместим.
 - Ошибка установки Windows IPv6 guard прерывает подключение и запускает откат.
 - Desktop DNS использует адрес из `TUNCONF` и повторяет усечённый UDP-ответ по TCP.
 - Учёт трафика устройства берёт `device_id` текущей сессии: трафик остальных
@@ -38,11 +68,11 @@
 
 ## Проверки исходников
 
-- Rust client: 256 passed, 4 ignored; Clippy с `-D warnings`.
-- Rust server: 114 passed на `x86_64-unknown-linux-gnu`; Clippy с `-D warnings`.
+- Rust client: 260 passed, 4 ignored; Clippy с `-D warnings`.
+- Rust server: 117 passed на `x86_64-unknown-linux-gnu`; Clippy с `-D warnings`.
 - Android: 159 unit tests, 0 failures/errors; `lintDebug` успешен.
 - Desktop: Go tests/race/vet и Windows cross-compilation успешны.
 - ShellCheck, тест валидации подсети и синтаксис JavaScript панели успешны.
 
 Live deploy, Windows runtime, физический OpenWrt и полный VK TURN E2E в этой
-итерации не выполнялись. Ранее существовавшие файлы `desktop/bin/` не заменялись.
+итерации не выполнялись. Для релиза `desktop/bin/` пересобирается из тех же исходников.

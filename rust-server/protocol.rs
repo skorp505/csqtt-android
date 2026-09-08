@@ -5259,7 +5259,7 @@ mod tests {
     #[test]
     fn session_lease_is_control() {
         assert!(is_control_payload(SESSION_LEASE));
-        assert!(is_control_payload(b"CSQPX1\x01\0\0\0\0\0\0\0\x01"));
+        assert!(is_control_payload(b"CSQPX2\x01\0\0\0\0\0\0\0\x01"));
     }
 
     #[test]
@@ -5268,7 +5268,7 @@ mod tests {
         assert!(should_flush_udp_immediately(STREAM_REPAIR_PREFIX));
         assert!(should_flush_udp_immediately(b"READY"));
         assert!(should_flush_udp_immediately(
-            b"CSQPX1\x04\0\0\0\0\0\0\0\x01data"
+            b"CSQPX2\x04\0\0\0\0\0\0\0\x01data"
         ));
         assert!(!should_flush_udp_immediately(&[0x45, 0, 0, 28]));
     }

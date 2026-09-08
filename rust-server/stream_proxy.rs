@@ -14,9 +14,10 @@ use tokio::{
     sync::mpsc,
 };
 
-pub const MAGIC: &[u8; 6] = b"CSQPX1";
+pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 const MAX_DATA: usize = 2_000;
+use crate::proxy_sequence::StreamSequence;
 const MAX_GLOBAL_STREAMS: usize = 256;
 const MAX_SESSION_STREAMS: usize = 32;
 const OPEN: u8 = 1;
@@ -188,7 +189,7 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
             tokio::spawn(run_stream(app, session_id, frame.stream_id, target, rx));
         }
         DATA => {
-            if frame.payload.len() > MAX_DATA {
+            if frame.payload.len() > MAX_DATA + 8 {
                 bail!("proxy data frame too large");
             }
             if enqueue_data(&app.proxy_streams, key, frame.payload) {
@@ -219,14 +220,16 @@ async fn run_stream(
         stream.set_nodelay(true)?;
         send_frame(&app, session_id, encode_frame(OPEN_OK, stream_id, &[]))?;
         let mut buffer = vec![0u8; MAX_DATA];
+        let mut sent = StreamSequence::default();
+        let mut received = StreamSequence::default();
         loop {
             tokio::select! {
                 read = stream.read(&mut buffer) => match read? {
                     0 => break,
-                    length => send_frame(&app, session_id, encode_frame(DATA, stream_id, &buffer[..length]))?,
+                    length => send_frame(&app, session_id, encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?))?,
                 },
                 command = input.recv() => match command {
-                    Some(StreamInput::Data(data)) => stream.write_all(&data).await?,
+                    Some(StreamInput::Data(data)) => stream.write_all(received.decode(&data)?).await?,
                     Some(StreamInput::Close) | None => break,
                 },
             }

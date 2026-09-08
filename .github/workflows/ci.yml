@@ -23,6 +23,8 @@ jobs:
 
   rust-server:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -32,6 +34,7 @@ jobs:
       - run: cargo +1.97.1 fmt --manifest-path rust-server/Cargo.toml --all -- --check
       - run: cargo +1.97.1 clippy --manifest-path rust-server/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo +1.97.1 test --manifest-path rust-server/Cargo.toml --all-targets --locked
+      - run: bash scripts/test_tunnel_subnet.sh
 
   android:
     runs-on: ubuntu-latest

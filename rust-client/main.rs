@@ -17,6 +17,8 @@ mod obfs;
 mod packet;
 mod profiles;
 mod protocol;
+#[path = "../shared/proxy_sequence.rs"]
+mod proxy_sequence;
 mod repair;
 #[path = "../shared/selective_fec.rs"]
 mod selective_fec;

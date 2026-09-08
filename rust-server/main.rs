@@ -32,6 +32,8 @@ mod packet;
 mod perf;
 mod protocol;
 mod proxy_route;
+#[path = "../shared/proxy_sequence.rs"]
+mod proxy_sequence;
 #[path = "../shared/selective_fec.rs"]
 mod selective_fec;
 mod stream_proxy;

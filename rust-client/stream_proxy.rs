@@ -20,9 +20,10 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-pub const MAGIC: &[u8; 6] = b"CSQPX1";
+pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 const MAX_DATA: usize = 2_000;
+use crate::proxy_sequence::StreamSequence;
 const MAX_STREAMS: usize = 64;
 pub(crate) const OPEN: u8 = 1;
 const OPEN_OK: u8 = 2;
@@ -112,7 +113,9 @@ pub async fn start(
             let event = match frame.kind {
                 OPEN_OK => Inbound::Opened,
                 OPEN_ERR => Inbound::Error(frame.payload.first().copied().unwrap_or(1)),
-                DATA if frame.payload.len() <= MAX_DATA => Inbound::Data(frame.payload.to_vec()),
+                DATA if frame.payload.len() <= MAX_DATA + 8 => {
+                    Inbound::Data(frame.payload.to_vec())
+                }
                 CLOSE => Inbound::Closed,
                 _ => continue,
             };
@@ -174,15 +177,17 @@ async fn handle_client(
         }
         let (mut reader, mut writer) = socket.into_split();
         let mut buffer = vec![0u8; MAX_DATA];
+        let mut sent = StreamSequence::default();
+        let mut received = StreamSequence::default();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 read = reader.read(&mut buffer) => match read? {
                     0 => break,
-                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &buffer[..length]))?,
+                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?))?,
                 },
                 inbound = rx.recv() => match inbound {
-                    Some(Inbound::Data(data)) => writer.write_all(&data).await?,
+                    Some(Inbound::Data(data)) => writer.write_all(received.decode(&data)?).await?,
                     Some(Inbound::Closed | Inbound::Error(_)) | None => break,
                     Some(Inbound::Opened) => {}
                 },
@@ -408,10 +413,14 @@ mod tests {
         let data_packet = priority_rx.recv(&cancel).await.unwrap();
         let data = parse_frame(data_packet.as_slice()).unwrap();
         assert_eq!(data.kind, DATA);
-        assert_eq!(data.payload, b"hello");
+        assert_eq!(&data.payload[8..], b"hello");
         assert!(priority_rx2.try_recv().is_none());
 
-        let response = encode_frame(DATA, stream_id, b"world");
+        let response = encode_frame(
+            DATA,
+            stream_id,
+            &StreamSequence::default().encode(b"world").unwrap(),
+        );
         let mut packet = pool.acquire();
         packet.set_read_len(response.len()).unwrap();
         packet.as_mut_slice().copy_from_slice(&response);

@@ -42,6 +42,9 @@ pub fn parse_config_response(response: &[u8]) -> Result<ConfigResponse> {
     }
     if let Some(reason) = response.strip_prefix("DENIED:") {
         match reason {
+            "protocol_mismatch" => bail!(
+                "FATAL_AUTH: несовместимый протокол сервера; установите сервер danusha2345/csqtt-android той же версии. Сервер amurcanov/csqtt 2.1.9 использует другой wire protocol"
+            ),
             "wrong_password" => bail!("FATAL_AUTH: неверный пароль подключения"),
             "expired" => bail!("FATAL_AUTH: срок действия пароля истёк"),
             "device_mismatch" => {
@@ -133,6 +136,16 @@ fn parse_stream_command(payload: &[u8], prefix: &[u8]) -> Option<StreamRepairCom
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_mismatch_explains_server_pairing_and_stops_retries() {
+        let message = parse_config_response(b"DENIED:protocol_mismatch")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("FATAL_AUTH"));
+        assert!(message.contains("danusha2345/csqtt-android"));
+        assert!(message.contains("несовместимый протокол"));
+    }
 
     #[test]
     fn request_matches_go_contract() {

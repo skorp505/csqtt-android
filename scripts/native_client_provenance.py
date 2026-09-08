@@ -73,6 +73,7 @@ def input_files() -> list[Path]:
         ROOT / "scripts/native_client_provenance.py",
         ROOT / "scripts/native_client_provenance.ps1",
         ROOT / "shared/striped_scheduler.rs",
+        ROOT / "shared/proxy_sequence.rs",
     ]
     files.extend((ROOT / "rust-client").glob("*.rs"))
     files.extend(path for path in (ROOT / "rust-client/dispatcher").rglob("*") if path.is_file())
