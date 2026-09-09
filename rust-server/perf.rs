@@ -350,15 +350,14 @@ fn parse_proc_stat(stat: &str) -> Option<(&str, u64, u64)> {
 }
 
 fn ticks_to_ns(user_ticks: u64, system_ticks: u64) -> Option<(u64, u64)> {
-    static TICKS_PER_SECOND: LazyLock<i64> =
+    // c_long is 32-bit on armv7, so keep the raw type and widen once here.
+    static TICKS_PER_SECOND: LazyLock<libc::c_long> =
         LazyLock::new(|| unsafe { libc::sysconf(libc::_SC_CLK_TCK) });
-    let ticks_per_second = *TICKS_PER_SECOND;
-    if ticks_per_second <= 0 {
-        return None;
-    }
+    let ticks_per_second = u128::try_from(*TICKS_PER_SECOND)
+        .ok()
+        .filter(|ticks| *ticks > 0)?;
     let scale = |ticks: u64| {
-        (u128::from(ticks) * 1_000_000_000u128 / ticks_per_second as u128).min(u128::from(u64::MAX))
-            as u64
+        (u128::from(ticks) * 1_000_000_000u128 / ticks_per_second).min(u128::from(u64::MAX)) as u64
     };
     Some((scale(user_ticks), scale(system_ticks)))
 }

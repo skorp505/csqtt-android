@@ -122,10 +122,11 @@ call :cleanup_zig_wrappers
 
 echo Copying binaries to assets directory...
 if not exist "%ASSETS_DIR%" mkdir "%ASSETS_DIR%"
-copy /Y "%CARGO_TARGET_DIR%\x86_64-unknown-linux-musl\release\csqtt" "%ASSETS_DIR%\csqtt" >nul
+copy /Y "%CARGO_TARGET_DIR%\x86_64-unknown-linux-musl\release\csqtt" "%ASSETS_DIR%\csqtt-linux-amd64" >nul
 if errorlevel 1 goto fail
-for %%F in ("%ASSETS_DIR%\csqtt") do echo csqtt: %%~zF bytes
-echo Success: Linux musl binary copied to %ASSETS_DIR%
+for %%F in ("%ASSETS_DIR%\csqtt-linux-amd64") do echo csqtt-linux-amd64: %%~zF bytes
+echo Success: Linux musl amd64 binary copied to %ASSETS_DIR%
+echo Note: csqtt-linux-arm64 and csqtt-linux-armv7 are built with build_linux.sh --arch all on Linux/WSL.
 exit /b 0
 
 :fail

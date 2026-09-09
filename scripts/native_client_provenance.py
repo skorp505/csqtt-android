@@ -36,7 +36,16 @@ SPECS = (
         "elf_class": 1,
         "machine": 40,
     },
+    {
+        "abi": "x86_64",
+        "target": "x86_64-linux-android",
+        "path": "app/src/main/jniLibs/x86_64/libclient.so",
+        "cargo": "build/rust-client-android-x86_64/x86_64-linux-android/release/client",
+        "elf_class": 2,
+        "machine": 62,
+    },
 )
+SERVER_ASSETS = ("csqtt-linux-amd64", "csqtt-linux-arm64", "csqtt-linux-armv7")
 
 
 def sha256(path: Path) -> str:
@@ -186,12 +195,13 @@ def verify_manifest() -> None:
 def verify_release() -> None:
     verify_manifest()
     _, version = package_identity()
-    server = ROOT / "app/src/main/assets/csqtt"
     deploy = ROOT / "app/src/main/assets/deploy.sh"
-    require_file(server, "Embedded server")
     require_file(deploy, "deploy.sh")
-    if f"CSQTT Server {version}".encode("utf-8") not in server.read_bytes():
-        raise RuntimeError(f"Embedded server does not report version {version}")
+    for asset in SERVER_ASSETS:
+        server = ROOT / "app/src/main/assets" / asset
+        require_file(server, f"Embedded server {asset}")
+        if f"CSQTT Server {version}".encode("utf-8") not in server.read_bytes():
+            raise RuntimeError(f"Embedded server {asset} does not report version {version}")
     deploy_text = deploy.read_text(encoding="utf-8")
     required = (
         f'SCRIPT_VERSION="{version}"',

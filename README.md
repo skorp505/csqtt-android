@@ -68,7 +68,8 @@ debug-подпись. Перед ней также обязательно дол
 
 ```bash
 scripts/build_android_native.sh --tests
-cp rust-server/dist/csqtt app/src/main/assets/csqtt
+rust-server/build_linux.sh --arch all --tests
+cp rust-server/dist/csqtt-linux-* app/src/main/assets/
 scripts/build_apk.sh
 ```
 
@@ -81,16 +82,21 @@ APK создаются в `app/build/outputs/apk/release/`.
 ```bash
 cd rust-client
 cargo +1.97.1 test --locked
-cargo +1.97.1 ndk -t arm64-v8a -t armeabi-v7a -P 26 build --release --locked
+cargo +1.97.1 ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P 26 build --release --locked
 ```
 
-Linux server x86_64/musl:
+Linux server (статические musl-бинарники для `amd64`, `arm64` и `armv7`; нужны
+`zig` и `cargo-zigbuild`):
 
 ```bash
 cd rust-server
 cargo +1.97.1 test --locked
-cargo +1.97.1 zigbuild --release --locked --target x86_64-unknown-linux-musl
+./build_linux.sh --arch all --tests   # dist/csqtt-linux-{amd64,arm64,armv7}
 ```
+
+Одна архитектура: `./build_linux.sh --arch arm64`. Приложение при деплое само
+выбирает бинарник по `uname -m` VPS. `build_linux.bat` на Windows собирает только
+`amd64`; ARM-бинарники собираются на Linux или в WSL.
 
 ## OpenWrt
 

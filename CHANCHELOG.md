@@ -4,6 +4,42 @@
 
 ## [Unreleased]
 
+### Добавлено
+
+- Серверные бинарники для `arm64` и `armv7` (статический musl) наряду с `amd64`:
+  `rust-server/build_linux.sh --arch amd64|arm64|armv7|all` кладёт
+  `dist/csqtt-linux-<arch>`, APK несёт все три, приложение при деплое выбирает
+  нужный по `uname -m` VPS; `deploy.sh` принимает `aarch64` и `armv7l`.
+- Android-сборка для `x86_64` (эмуляторы, Chromebook, часть TV-приставок):
+  ABI в Gradle, `libclient.so` в native-скриптах и provenance, отдельный APK.
+- Android TV: `leanback`-фича, баннер 320×180 и `LEANBACK_LAUNCHER`, тачскрин и
+  Wi-Fi объявлены необязательными.
+- `tun-recover.sh` как `ExecStartPre` systemd-юнита и шаг entrypoint Docker:
+  перед стартом освобождает UDP-порт от нашего же зависшего runtime (чужой
+  процесс на порту не трогает, ошибка 24) и удаляет оставшийся TUN-интерфейс.
+- В веб-панели список DNS-профилей (Yandex, Cloudflare, Google, AdGuard, Quad9,
+  OpenDNS, NextDNS, Comms, Geohide, Xbox, Rostelecom, BI.ZONE, НСДИ), который
+  только заполняет поля; ручной ввод любых адресов сохранён.
+- Диагностика сервера для приложений к issue: `scripts/diagnose_csqtt_server.sh`
+  (read-only снимок systemd/сокетов/TUN/firewall/journal с вырезанием секретов)
+  и `scripts/csqtt-network-report.sh` (отчёт или захват UDP на порту сервера).
+- CI-джоба `rust-server-cross` собирает и проверяет clippy для `arm64` и `armv7`.
+
+### Изменено
+
+- Пароль подключения, который перестал читаться из Android Keystore, теперь
+  распознаётся отдельно от «не задан»: в логе указывается причина отказа
+  запуска, а нечитаемая запись сбрасывается с подсказкой ввести пароль заново.
+- Причина блокировки кнопки «Подключить» выводится в лог туннеля
+  (`ConnectionStartPolicy`), а не молча.
+- Серверный asset в APK переименован: `assets/csqtt` → `assets/csqtt-linux-amd64`;
+  `build_linux.bat` на Windows собирает только `amd64`.
+
+### Исправлено
+
+- `rust-server/perf.rs`: пересчёт тиков CPU не зависел от ширины `c_long` и не
+  собирался под 32-битные цели.
+
 ## [2.1.11] — 2026-09-08
 
 - SOCKS5 `CSQPX2` проверяет последовательность DATA и закрывает поток при

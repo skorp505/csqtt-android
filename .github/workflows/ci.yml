@@ -36,6 +36,25 @@ jobs:
       - run: cargo +1.97.1 test --manifest-path rust-server/Cargo.toml --all-targets --locked
       - run: bash scripts/test_tunnel_subnet.sh
 
+  rust-server-cross:
+    # Статические musl-бинарники для ARM VPS; amd64 собирается тем же скриптом при релизе.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [arm64, armv7]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: cargo install cargo-zigbuild --locked
+      - run: bash rust-server/build_linux.sh --arch ${{ matrix.arch }} --tests
+      - run: file rust-server/dist/csqtt-linux-${{ matrix.arch }}
+
   android:
     runs-on: ubuntu-latest
     steps:

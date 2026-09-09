@@ -53,6 +53,7 @@ internal data class DeploySettingsSnapshot(
 internal data class TunnelAuthSnapshot(
     val profile: Int = -1,
     val connectionPassword: String = "",
+    val connectionPasswordState: StoredSecretState = StoredSecretState.Missing,
 ) {
     val isLoaded: Boolean
         get() = profile >= 0
@@ -353,14 +354,11 @@ class SettingsStore(context: Context) {
     }.onIo()
     internal val tunnelAuthSnapshot: Flow<TunnelAuthSnapshot> = dataStore.data.map { prefs ->
         val profile = prefs[ACTIVE_PROFILE] ?: 0
+        val password = readSecretState(prefs, CONNECTION_PASSWORD_ENCRYPTED, CONNECTION_PASSWORD, profile)
         TunnelAuthSnapshot(
             profile = profile,
-            connectionPassword = readSecret(
-                prefs,
-                CONNECTION_PASSWORD_ENCRYPTED,
-                CONNECTION_PASSWORD,
-                profile,
-            ),
+            connectionPassword = password.value,
+            connectionPasswordState = password.state,
         )
     }.onIo()
     val excludedApps: Flow<String> = dataStore.data.map { prefs ->
@@ -1069,10 +1067,34 @@ class SettingsStore(context: Context) {
         encryptedKey: Preferences.Key<String>,
         legacyKey: Preferences.Key<String>,
         profile: Int
-    ): String {
-        val profEncryptedKey = getProfileKey(encryptedKey, profile)
-        val profLegacyKey = getProfileKey(legacyKey, profile)
-        return secureStore.decrypt(prefs[profEncryptedKey]) ?: prefs[profLegacyKey] ?: ""
+    ): String = readSecretState(prefs, encryptedKey, legacyKey, profile).value
+
+    private fun readSecretState(
+        prefs: Preferences,
+        encryptedKey: Preferences.Key<String>,
+        legacyKey: Preferences.Key<String>,
+        profile: Int
+    ): StoredSecret = resolveStoredSecret(
+        prefs[getProfileKey(encryptedKey, profile)],
+        prefs[getProfileKey(legacyKey, profile)],
+        secureStore::decrypt,
+    )
+
+    /** Удаляет пароль подключения, который больше не читается из Keystore. Возвращает true, если что-то удалено. */
+    suspend fun resetUnreadableConnectionPassword(): Boolean {
+        var reset = false
+        dataStore.edit { prefs ->
+            val profile = prefs[ACTIVE_PROFILE] ?: 0
+            val encryptedKey = getProfileKey(CONNECTION_PASSWORD_ENCRYPTED, profile)
+            val legacyKey = getProfileKey(CONNECTION_PASSWORD, profile)
+            val state = resolveStoredSecret(prefs[encryptedKey], prefs[legacyKey], secureStore::decrypt).state
+            if (state == StoredSecretState.Unreadable) {
+                prefs.remove(encryptedKey)
+                prefs.remove(legacyKey)
+                reset = true
+            }
+        }
+        return reset
     }
 
     private fun MutablePreferences.putSecret(

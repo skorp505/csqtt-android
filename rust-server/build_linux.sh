@@ -7,15 +7,32 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 RUN_CHECKS=""
 DIAGNOSTICS=0
+ARCHES=(amd64)
 while (($#)); do
   case "$1" in
     --tests) RUN_CHECKS=1 ;;
     --no-tests) RUN_CHECKS=0 ;;
     --diagnostics) DIAGNOSTICS=1 ;;
-    *) echo "Usage: $0 [--tests|--no-tests] [--diagnostics]" >&2; exit 2 ;;
+    --arch)
+      shift
+      case "${1:-}" in
+        amd64|arm64|armv7) ARCHES=("$1") ;;
+        all) ARCHES=(amd64 arm64 armv7) ;;
+        *) echo "Usage: $0 [--tests|--no-tests] [--diagnostics] [--arch amd64|arm64|armv7|all]" >&2; exit 2 ;;
+      esac
+      ;;
+    *) echo "Usage: $0 [--tests|--no-tests] [--diagnostics] [--arch amd64|arm64|armv7|all]" >&2; exit 2 ;;
   esac
   shift
 done
+# Rust target triple for every supported server arch.
+rust_target() {
+  case "$1" in
+    amd64) echo x86_64-unknown-linux-musl ;;
+    arm64) echo aarch64-unknown-linux-musl ;;
+    armv7) echo armv7-unknown-linux-musleabihf ;;
+  esac
+}
 if [[ -z "$RUN_CHECKS" ]]; then
   if [[ -t 0 ]]; then
     read -rp "Запустить проверки и тесты (или их кросс-компиляцию) перед сборкой? [Y/n]: " REPLY
@@ -36,81 +53,30 @@ command -v rustup >/dev/null
 command -v zig >/dev/null
 cargo zigbuild --help >/dev/null
 rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
-rustup target add x86_64-unknown-linux-musl --toolchain 1.97.1
+for ARCH in "${ARCHES[@]}"; do rustup target add "$(rust_target "$ARCH")" --toolchain 1.97.1; done
 rustc +1.97.1 --version
 zig version
-WRAP="$ROOT/build/zig-wrappers"
-mkdir -p "$WRAP"
 HOST="$(rustc +1.97.1 -vV | sed -n 's/^host: //p')"
-if [[ "$HOST" == *windows* ]]; then
-cat > "$WRAP/zigcc.ps1" <<'PS1'
-$filtered = @($args | Where-Object { $_ -ne "--target=x86_64-unknown-linux-musl" })
-& zig cc -target x86_64-linux-musl @filtered
-exit $LASTEXITCODE
-PS1
-cat > "$WRAP/zigcxx.ps1" <<'PS1'
-$filtered = @($args | Where-Object { $_ -ne "--target=x86_64-unknown-linux-musl" })
-& zig c++ -target x86_64-linux-musl @filtered
-exit $LASTEXITCODE
-PS1
-cat > "$WRAP/zigcc.cmd" <<'CMD'
-@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0zigcc.ps1" %*
-CMD
-cat > "$WRAP/zigcxx.cmd" <<'CMD'
-@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0zigcxx.ps1" %*
-CMD
-cat > "$WRAP/zigar.cmd" <<'CMD'
-@echo off
-zig ar %*
-CMD
-CC_WRAPPER="$WRAP/zigcc.cmd"
-CXX_WRAPPER="$WRAP/zigcxx.cmd"
-AR_WRAPPER="$WRAP/zigar.cmd"
-else
-cat > "$WRAP/zigcc" <<'SH'
-#!/usr/bin/env bash
-args=()
-for arg in "$@"; do
-  [[ "$arg" == "--target=x86_64-unknown-linux-musl" ]] || args+=("$arg")
-done
-exec zig cc -target x86_64-linux-musl "${args[@]}"
-SH
-cat > "$WRAP/zigcxx" <<'SH'
-#!/usr/bin/env bash
-args=()
-for arg in "$@"; do
-  [[ "$arg" == "--target=x86_64-unknown-linux-musl" ]] || args+=("$arg")
-done
-exec zig c++ -target x86_64-linux-musl "${args[@]}"
-SH
-cat > "$WRAP/zigar" <<'SH'
-#!/usr/bin/env bash
-exec zig ar "$@"
-SH
-chmod +x "$WRAP/zigcc" "$WRAP/zigcxx" "$WRAP/zigar"
-CC_WRAPPER="$WRAP/zigcc"
-CXX_WRAPPER="$WRAP/zigcxx"
-AR_WRAPPER="$WRAP/zigar"
-fi
-export CC_x86_64_unknown_linux_musl="$CC_WRAPPER"
-export CXX_x86_64_unknown_linux_musl="$CXX_WRAPPER"
-export AR_x86_64_unknown_linux_musl="$AR_WRAPPER"
-export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$CC_WRAPPER"
 if [[ "$RUN_CHECKS" == 1 ]]; then
   cargo +1.97.1 fmt --all -- --check
-  cargo +1.97.1 zigbuild --all-targets --target x86_64-unknown-linux-musl "${FEATURE_ARGS[@]}"
-  CARGO_TARGET_DIR="$ROOT/build/linux-musl-check" cargo +1.97.1 clippy --release --target x86_64-unknown-linux-musl "${FEATURE_ARGS[@]}" --all-targets -- -D warnings
-  if [[ "$HOST" == *linux* ]]; then
-    echo "Running Linux musl tests..."
-    CARGO_TARGET_DIR="$ROOT/build/linux-musl-tests" cargo +1.97.1 test --target x86_64-unknown-linux-musl "${FEATURE_ARGS[@]}" --all-targets
-  else
-    echo "Compiling Linux musl test binaries (they cannot run on this non-Linux host)..."
-    CARGO_TARGET_DIR="$ROOT/build/linux-musl-tests" cargo +1.97.1 zigbuild --target x86_64-unknown-linux-musl "${FEATURE_ARGS[@]}" --tests
-  fi
 fi
-CARGO_TARGET_DIR="$ROOT/build/linux-musl" cargo +1.97.1 zigbuild --release --target x86_64-unknown-linux-musl "${FEATURE_ARGS[@]}"
 mkdir -p "$ROOT/dist"
-cp "$ROOT/build/linux-musl/x86_64-unknown-linux-musl/release/csqtt" "$ROOT/dist/csqtt"
-ls -lh "$ROOT/dist/csqtt"
+for ARCH in "${ARCHES[@]}"; do
+  TARGET="$(rust_target "$ARCH")"
+  # cargo-zigbuild сам подставляет zig как cc/линкер для цели; свои обёртки
+  # дублируют crt1 и ломают линковку arm64.
+  if [[ "$RUN_CHECKS" == 1 ]]; then
+    cargo +1.97.1 zigbuild --all-targets --target "$TARGET" "${FEATURE_ARGS[@]}"
+    CARGO_TARGET_DIR="$ROOT/build/linux-musl-check" RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild clippy --release --target "$TARGET" "${FEATURE_ARGS[@]}" --all-targets -- -D warnings
+    if [[ "$HOST" == *linux* && "$ARCH" == amd64 ]]; then
+      echo "Running Linux musl tests..."
+      CARGO_TARGET_DIR="$ROOT/build/linux-musl-tests" RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild test --target "$TARGET" "${FEATURE_ARGS[@]}" --all-targets
+    else
+      echo "Compiling $TARGET test binaries (they cannot run on this host)..."
+      CARGO_TARGET_DIR="$ROOT/build/linux-musl-tests" cargo +1.97.1 zigbuild --target "$TARGET" "${FEATURE_ARGS[@]}" --tests
+    fi
+  fi
+  CARGO_TARGET_DIR="$ROOT/build/linux-musl" cargo +1.97.1 zigbuild --release --target "$TARGET" "${FEATURE_ARGS[@]}"
+  cp "$ROOT/build/linux-musl/$TARGET/release/csqtt" "$ROOT/dist/csqtt-linux-$ARCH"
+done
+ls -lh "$ROOT"/dist/csqtt-linux-*

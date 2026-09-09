@@ -4,15 +4,17 @@
 param(
     [Parameter(Mandatory = $true)][string]$ClientDir,
     [Parameter(Mandatory = $true)][string]$Arm64TargetDir,
-    [Parameter(Mandatory = $true)][string]$Armv7TargetDir
+    [Parameter(Mandatory = $true)][string]$Armv7TargetDir,
+    [Parameter(Mandatory = $true)][string]$X86_64TargetDir
 )
 
 $ErrorActionPreference = "Stop"
 $cargo = (Get-Command cargo.exe -ErrorAction Stop).Source
-$jobsPerAbi = [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount / 2))
+$jobsPerAbi = [Math]::Max(1, [int][Math]::Floor([Environment]::ProcessorCount / 3))
 $builds = @(
     @{ Abi = "arm64-v8a"; TargetDir = $Arm64TargetDir },
-    @{ Abi = "armeabi-v7a"; TargetDir = $Armv7TargetDir }
+    @{ Abi = "armeabi-v7a"; TargetDir = $Armv7TargetDir },
+    @{ Abi = "x86_64"; TargetDir = $X86_64TargetDir }
 )
 $running = @()
 

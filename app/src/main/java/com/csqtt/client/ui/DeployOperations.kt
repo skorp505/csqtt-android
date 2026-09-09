@@ -169,9 +169,34 @@ private fun publishDeployOutput(rawLine: String) {
     }
 }
 
+internal enum class ServerArchitecture(val assetName: String, val displayName: String) {
+    AMD64("csqtt-linux-amd64", "amd64"),
+    ARM64("csqtt-linux-arm64", "ARM64"),
+    ARMV7("csqtt-linux-armv7", "ARM32"),
+}
+
+internal fun serverArchitectureForMachine(output: String): ServerArchitecture {
+    // stdout и stderr приходят одним потоком: предупреждения bash/locale могут стоять
+    // перед строкой uname, поэтому ищем известное имя машины среди всех строк.
+    val lines = output.lineSequence().map { it.trim().lowercase(java.util.Locale.ROOT) }.filter { it.isNotEmpty() }.toList()
+    if (lines.isEmpty()) throw IOException("VPS не вернул архитектуру через uname -m")
+    return lines.firstNotNullOfOrNull { machine ->
+        when (machine) {
+            "x86_64", "amd64" -> ServerArchitecture.AMD64
+            "aarch64", "arm64" -> ServerArchitecture.ARM64
+            "armv7l", "armv7", "armhf" -> ServerArchitecture.ARMV7
+            else -> null
+        }
+    } ?: throw IOException(
+        "Архитектура VPS ${lines.last()} пока не поддерживается. Поддерживаются: x86_64, aarch64, armv7l",
+    )
+}
+
 private fun deployAssetLabel(fileName: String): String = when (fileName) {
     "deploy.sh" -> "скрипт установки"
-    "csqtt" -> "сервер CSQTT"
+    "csqtt-linux-amd64" -> "сервер CSQTT (amd64)"
+    "csqtt-linux-arm64" -> "сервер CSQTT (ARM64)"
+    "csqtt-linux-armv7" -> "сервер CSQTT (ARM32)"
     "csqtt.env" -> "настройки веб-панели"
     "csqtt-deploy.json" -> "настройки DNS и доступа"
     "hev-socks5-tunnel" -> "C-движок туннеля"
@@ -588,6 +613,13 @@ internal suspend fun performDeploy(
         }
         TunnelManager.addDeploySuccessLog("SSH-соединение установлено")
 
+        val architectureResult = sshClient.execResult("uname -m", timeout = 10000L)
+        if (architectureResult.exitStatus != 0) {
+            throw IOException("Не удалось определить архитектуру VPS: ${architectureResult.output.trim().take(160)}")
+        }
+        val serverArchitecture = serverArchitectureForMachine(architectureResult.output)
+        TunnelManager.addDeployInfoLog("Архитектура VPS: ${serverArchitecture.displayName}")
+
         onProgress(0.05f, "Подготовка файлов...")
         TunnelManager.addDeployInfoLog("Подготовка файлов установки")
         val dnsValue = listOf(dns1, dns2).map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
@@ -610,7 +642,7 @@ internal suspend fun performDeploy(
         }
 
         val scriptFile = extractAsset("deploy.sh")
-        val serverFile = extractAsset("csqtt")
+        val serverFile = extractAsset(serverArchitecture.assetName)
         val environmentFile = File(workingDir, "csqtt.env").apply {
             writeText(
                 buildString {

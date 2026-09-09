@@ -13,7 +13,11 @@ cargo +1.97.1 test --locked --target x86_64-unknown-linux-gnu
 cargo +1.97.1 zigbuild --release --locked --target x86_64-unknown-linux-musl
 ```
 
-На VPS перенесите бинарник `target/x86_64-unknown-linux-musl/release/csqtt`,
+Для ARM-VPS цель `aarch64-unknown-linux-musl` (`arm64`) или
+`armv7-unknown-linux-musleabihf` (`armv7`); `rust-server/build_linux.sh --arch all`
+собирает все три в `dist/csqtt-linux-<arch>`.
+
+На VPS перенесите бинарник `target/<target>/release/csqtt` нужной архитектуры,
 `scripts/install_server.sh` и `app/src/main/assets/deploy.sh`, сохранив
 взаимное расположение двух скриптов. VPS должен иметь доступ к пакетным
 репозиториям и интернету; для wrapper нужен Python 3. Используется тот же

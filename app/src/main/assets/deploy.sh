@@ -255,7 +255,9 @@ require_runtime_tools() {
     fi
     case "$(uname -m)" in
         x86_64|amd64) ;;
-        *) die "Серверный бинарник CSQTT собран для x86_64; архитектура $(uname -m) пока не поддерживается." ;;
+        aarch64|arm64) log_info "Архитектура VPS: ARM64" ;;
+        armv7l|armv7|armhf) log_info "Архитектура VPS: ARM32" ;;
+        *) die "Архитектура VPS $(uname -m) не поддерживается. Поддерживаются: x86_64, aarch64, armv7l." ;;
     esac
 }
 
@@ -751,9 +753,96 @@ NETEOF
     chmod 0755 "$target"
 }
 
+# ExecStartPre-помощник: перед стартом сервиса освобождает UDP-порт, который держит
+# наш же старый процесс (например, контейнер, переживший переход на systemd), и
+# удаляет TUN-интерфейс, оставшийся от него. Чужой процесс на порту не трогает.
+write_tun_recovery_helper() {
+    local target="$1"
+    cat > "$target" << RECOVEREOF
+#!/bin/sh
+set -eu
+CSQTT_IFACE="$CSQTT_IFACE"
+PEER_PORT="$PEER_PORT"
+CSQTT_CONFIG_DIR="$CSQTT_CONFIG_DIR"
+
+peer_port_is_busy() {
+    ss -H -lun "sport = :\$PEER_PORT" 2>/dev/null | grep -q .
+}
+
+peer_port_pids() {
+    ss -H -lunp "sport = :\$PEER_PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -un || true
+}
+
+csqtt_process_is_owned() {
+    pid="\$1"
+    [ -r "/proc/\$pid/cmdline" ] || return 1
+    executable="\$(readlink "/proc/\$pid/exe" 2>/dev/null || true)"
+    case "\$executable" in
+        /usr/local/bin/csqtt|'/usr/local/bin/csqtt (deleted)'|/usr/local/lib/csqtt/*) return 0 ;;
+    esac
+    command_line="\$({ tr '\\0' ' ' < "/proc/\$pid/cmdline"; } 2>/dev/null || true)"
+    case " \$command_line " in
+        *" --config-dir \$CSQTT_CONFIG_DIR "*|*" /usr/local/bin/csqtt "*|*" /usr/local/lib/csqtt/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+release_owned_peer_port() {
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        peer_port_is_busy || return 0
+        pids="\$(peer_port_pids)"
+        if [ -z "\$pids" ]; then
+            sleep 0.2
+            continue
+        fi
+        for pid in \$pids; do
+            if ! csqtt_process_is_owned "\$pid"; then
+                echo "[CSQTT] UDP/\$PEER_PORT is held by foreign PID \$pid; refusing to kill it" >&2
+                ss -H -lunp "sport = :\$PEER_PORT" >&2 || true
+                return 24
+            fi
+            if [ "\$attempt" -le 5 ]; then
+                echo "[CSQTT] UDP/\$PEER_PORT stale runtime PID \$pid; terminating" >&2
+                kill -TERM "\$pid" 2>/dev/null || true
+            else
+                echo "[CSQTT] UDP/\$PEER_PORT stale runtime PID \$pid; killing" >&2
+                kill -KILL "\$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 0.2
+    done
+    echo "[CSQTT] UDP/\$PEER_PORT did not release" >&2
+    ss -H -lunp "sport = :\$PEER_PORT" >&2 || true
+    return 24
+}
+
+release_owned_peer_port || exit \$?
+
+if ! ip link show "\$CSQTT_IFACE" >/dev/null 2>&1; then
+    exit 0
+fi
+
+echo "[CSQTT] stale TUN interface \$CSQTT_IFACE detected; recovering runtime" >&2
+for attempt in 1 2 3 4; do
+    timeout 2 ip link del "\$CSQTT_IFACE" >/dev/null 2>&1 || true
+    if ! ip link show "\$CSQTT_IFACE" >/dev/null 2>&1; then
+        echo "[CSQTT] stale TUN interface \$CSQTT_IFACE removed" >&2
+        exit 0
+    fi
+    sleep 0.2
+done
+
+ip -d link show "\$CSQTT_IFACE" >&2 || true
+echo "[CSQTT] unable to release TUN interface \$CSQTT_IFACE" >&2
+exit 23
+RECOVEREOF
+    chmod 0755 "$target"
+}
+
 install_network_helper() {
     mkdir -p /usr/local/lib/csqtt
     write_network_helper /usr/local/lib/csqtt/network-up.sh
+    write_tun_recovery_helper /usr/local/lib/csqtt/tun-recover.sh
 }
 
 verify_configured_network() {
@@ -1373,8 +1462,9 @@ FROM debian:13-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates iproute2 iptables procps && rm -rf /var/lib/apt/lists/*
 COPY csqtt /usr/local/bin/csqtt
 COPY network-up.sh /usr/local/lib/csqtt/network-up.sh
-RUN chmod 0755 /usr/local/bin/csqtt /usr/local/lib/csqtt/network-up.sh
-ENTRYPOINT ["/bin/sh", "-ec", "/usr/local/lib/csqtt/network-up.sh; exec /usr/local/bin/csqtt \"$@\"", "--"]
+COPY tun-recover.sh /usr/local/lib/csqtt/tun-recover.sh
+RUN chmod 0755 /usr/local/bin/csqtt /usr/local/lib/csqtt/network-up.sh /usr/local/lib/csqtt/tun-recover.sh
+ENTRYPOINT ["/bin/sh", "-ec", "/usr/local/lib/csqtt/network-up.sh; /usr/local/lib/csqtt/tun-recover.sh; exec /usr/local/bin/csqtt \"$@\"", "--"]
 DOCKERFILE
 }
 
@@ -1390,6 +1480,8 @@ prepare_docker_candidate() {
         die "Не удалось подготовить Docker-бинарник" "$EXIT_PREFLIGHT_FAILED"
     write_network_helper "$context_dir/network-up.sh" || \
         die "Не удалось подготовить Docker network helper" "$EXIT_PREFLIGHT_FAILED"
+    write_tun_recovery_helper "$context_dir/tun-recover.sh" || \
+        die "Не удалось подготовить Docker TUN recovery helper" "$EXIT_PREFLIGHT_FAILED"
     write_csqtt_dockerfile "$context_dir/Dockerfile"
 
     CSQTT_DOCKER_CANDIDATE_IMAGE="${CSQTT_DOCKER_IMAGE}-candidate-$$"
@@ -1536,6 +1628,7 @@ Type=simple
 EnvironmentFile=-${CSQTT_ENV_FILE}
 Environment=CSQTT_SERVICE_MANAGER=systemd
 ExecStartPre=/usr/local/lib/csqtt/network-up.sh
+ExecStartPre=/usr/local/lib/csqtt/tun-recover.sh
 ExecStart=/usr/local/bin/csqtt --listen 0.0.0.0:${PEER_PORT} --web-port ${WEB_PORT} --config-dir ${CSQTT_CONFIG_DIR}
 Restart=on-failure
 RestartSec=1

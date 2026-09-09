@@ -52,9 +52,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.csqtt.client.ConnectionSource
+import com.csqtt.client.ConnectionStartBlocker
+import com.csqtt.client.ConnectionStartPolicy
 import com.csqtt.client.CsqttConstants
 import com.csqtt.client.R
 import com.csqtt.client.SettingsStore
+import com.csqtt.client.StoredSecretState
 import com.csqtt.client.TunnelAuthSnapshot
 import com.csqtt.client.TunnelManager
 import com.csqtt.client.TunnelService
@@ -135,9 +138,16 @@ internal fun ConnectionTab(
         else -> manualHashes.isNotEmpty() || configSyncEnabled
     }
     val peerPortValid = !manualPortsEnabled || serverPeerPort in 1..65535
-    val isManualValid = peer.isNotBlank() && !peer.contains(":") && hashesReady && connectionPassword.isNotBlank() && peerPortValid
-    val isLinkValid = parsedLink != null && hashesReady
-    val isValid = if (csqttLinkMode) isLinkValid else isManualValid
+    val startBlocker = ConnectionStartPolicy.blocker(
+        linkMode = csqttLinkMode,
+        linkValid = parsedLink != null,
+        peerValid = peer.isNotBlank() && !peer.contains(":"),
+        peerPortValid = peerPortValid,
+        connectionPasswordSet = connectionPassword.isNotBlank(),
+        connectionPasswordReadable = tunnelAuthSettings.connectionPasswordState != StoredSecretState.Unreadable,
+        hashesReady = hashesReady,
+    )
+    val isValid = startBlocker == null
     val hashStatus = when {
         csqttLinkMode && linkHashes.isNotEmpty() -> "${activeLinkHashes.size}/${CsqttConstants.Tunnel.MAX_VK_HASHES}"
         autoHashMode && vkTokenActive -> "Авто"
@@ -216,6 +226,25 @@ internal fun ConnectionTab(
             return
         }
         if (!isValid) {
+            val blocker = requireNotNull(startBlocker)
+            TunnelManager.updateLog(
+                "connection_configuration_${blocker.name}",
+                "[ПОДКЛЮЧЕНИЕ] Запуск не начат: ${blocker.message}",
+                99,
+                true,
+            )
+            if (blocker == ConnectionStartBlocker.StoredSecret) {
+                scope.launch {
+                    if (settingsStore.resetUnreadableConnectionPassword()) {
+                        context.showRaisedToast(
+                            "Сохранённый пароль не читается и сброшен. Введите его заново.",
+                            Toast.LENGTH_LONG,
+                        )
+                    }
+                    onInvalidConfiguration()
+                }
+                return
+            }
             onInvalidConfiguration()
             return
         }

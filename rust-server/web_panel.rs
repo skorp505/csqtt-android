@@ -3040,6 +3040,12 @@ const PANEL_HTML: &str = r##"
                         <button id="saveMainPasswordBtn" class="btn btn-primary" style="width: 100%; margin-top: 8px;" onclick="saveMainPassword()" disabled>Сохранить главный пароль</button>
                     </div>
                     <div class="glass-panel setting-card" style="display: flex; flex-direction: column; justify-content: space-between;">
+                        <div class="input-group" style="margin-bottom: 8px;">
+                            <label for="dns_preset">DNS-профиль</label>
+                            <select id="dns_preset" onchange="applyDnsPreset()">
+                                <option value="custom">Свои адреса</option>
+                            </select>
+                        </div>
                         <div style="display: flex; gap: 12px; margin-top: 4px;">
                             <div class="input-group" style="flex: 1; margin-bottom: 0;"><label for="dns_primary">Основной DNS</label><input id="dns_primary" placeholder="1.1.1.1"></div>
                             <div class="input-group" style="flex: 1; margin-bottom: 0;"><label for="dns_secondary">Резервный DNS</label><input id="dns_secondary" placeholder="1.0.0.1"></div>
@@ -3507,7 +3513,55 @@ const PANEL_HTML: &str = r##"
             document.getElementById('restartRequiredBanner')?.classList.toggle('visible', Boolean(required));
         }
 
+        // Пресеты только заполняют поля; сервер по-прежнему получает пару адресов,
+        // поэтому ручной ввод любых DNS сохраняется.
+        const DNS_PRESETS = [
+            ['yandex', 'Yandex DNS', '77.88.8.8', '77.88.8.1'],
+            ['cloudflare', 'Cloudflare DNS', '1.1.1.1', '1.0.0.1'],
+            ['google', 'Google DNS', '8.8.8.8', '8.8.4.4'],
+            ['adguard', 'AdGuard DNS', '94.140.14.14', '94.140.15.14'],
+            ['quad9', 'Quad9 DNS', '9.9.9.9', '149.112.112.112'],
+            ['opendns', 'OpenDNS', '208.67.222.222', '208.67.220.220'],
+            ['nextdns', 'NextDNS', '45.90.28.181', '45.90.30.181'],
+            ['comms', 'Comms DNS', '83.220.169.155', '212.109.195.93'],
+            ['geohide', 'Geohide DNS', '95.182.120.241', '37.230.192.51'],
+            ['xbox', 'Xbox DNS', '111.88.96.50', '111.88.96.51'],
+            ['rostelecom', 'Rostelecom DNS', '95.189.32.74', '195.208.5.1'],
+            ['bizone', 'BI.ZONE DNS', '195.208.6.1', '195.208.7.1'],
+            ['nsdi', 'НСДИ DNS', '195.208.4.1', '195.208.5.1'],
+        ];
+
+        function populateDnsPresets() {
+            const select = document.getElementById('dns_preset');
+            if (!select || select.options.length > 1) return;
+            for (const [id, name] of DNS_PRESETS) {
+                const option = document.createElement('option');
+                option.value = id;
+                option.textContent = name;
+                select.appendChild(option);
+            }
+        }
+
+        function syncDnsPresetSelection() {
+            const select = document.getElementById('dns_preset');
+            if (!select) return;
+            const primary = document.getElementById('dns_primary')?.value.trim() ?? '';
+            const secondary = document.getElementById('dns_secondary')?.value.trim() ?? '';
+            const match = DNS_PRESETS.find(([, , p, s]) => p === primary && s === secondary);
+            select.value = match ? match[0] : 'custom';
+        }
+
+        function applyDnsPreset() {
+            const id = document.getElementById('dns_preset')?.value ?? 'custom';
+            const preset = DNS_PRESETS.find(([presetId]) => presetId === id);
+            if (!preset) return;
+            document.getElementById('dns_primary').value = preset[2];
+            document.getElementById('dns_secondary').value = preset[3];
+            updateSettingsDirtyState();
+        }
+
         function updateSettingsDirtyState() {
+            syncDnsPresetSelection();
             const mainPassword = document.getElementById('mainpass')?.value ?? '';
             const dnsPrimary = document.getElementById('dns_primary')?.value.trim() ?? '';
             const dnsSecondary = document.getElementById('dns_secondary')?.value.trim() ?? '';
@@ -3535,6 +3589,7 @@ const PANEL_HTML: &str = r##"
                 ? Number(x.auto_restart_interval_hours)
                 : 0;
             document.getElementById('mainpass').value = savedMainPassword;
+            populateDnsPresets();
             document.getElementById('dns_primary').value = savedDnsPrimary;
             document.getElementById('dns_secondary').value = savedDnsSecondary;
             document.getElementById('auto_restart_interval').value = String(savedAutoRestartInterval);
@@ -4302,6 +4357,15 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         assert!(normalize_client_vk_hashes(&seven).is_err());
+    }
+
+    #[test]
+    fn panel_offers_dns_presets_without_dropping_manual_dns() {
+        assert!(PANEL_HTML.contains("id=\"dns_preset\""));
+        assert!(PANEL_HTML.contains("['nsdi', 'НСДИ DNS', '195.208.4.1', '195.208.5.1']"));
+        // Пресеты только заполняют поля: ручной ввод и старый POST-контракт остаются.
+        assert!(PANEL_HTML.contains("id=\"dns_primary\""));
+        assert!(PANEL_HTML.contains("dns_primary: primary, dns_secondary: secondary"));
     }
 
     #[test]

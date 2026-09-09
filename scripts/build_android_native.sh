@@ -38,14 +38,18 @@ fi
 
 arm64_target="$root/build/rust-client-android-arm64"
 armv7_target="$root/build/rust-client-android-armv7"
+x86_64_target="$root/build/rust-client-android-x86_64"
 cd "$root/rust-client"
 CARGO_TARGET_DIR="$arm64_target" cargo +1.97.1 ndk -t arm64-v8a -P 26 \
   build --release --locked
 CARGO_TARGET_DIR="$armv7_target" cargo +1.97.1 ndk -t armeabi-v7a -P 26 \
   build --release --locked
+CARGO_TARGET_DIR="$x86_64_target" cargo +1.97.1 ndk -t x86_64 -P 26 \
+  build --release --locked
 
-mkdir -p "$root/app/src/main/jniLibs/arm64-v8a" "$root/app/src/main/jniLibs/armeabi-v7a"
+mkdir -p "$root/app/src/main/jniLibs/arm64-v8a" "$root/app/src/main/jniLibs/armeabi-v7a" "$root/app/src/main/jniLibs/x86_64"
 cp "$arm64_target/aarch64-linux-android/release/client" "$root/app/src/main/jniLibs/arm64-v8a/libclient.so"
 cp "$armv7_target/armv7-linux-androideabi/release/client" "$root/app/src/main/jniLibs/armeabi-v7a/libclient.so"
+cp "$x86_64_target/x86_64-linux-android/release/client" "$root/app/src/main/jniLibs/x86_64/libclient.so"
 python3 "$root/scripts/native_client_provenance.py" write
 python3 "$root/scripts/native_client_provenance.py" verify
