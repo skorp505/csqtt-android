@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 #
 # Read-only снимок состояния сервера CSQTT для приложения к issue: systemd, процессы,
-# сокеты, TUN, firewall, journal. Пароли и токены вырезаются. Ничего не меняет.
+# сокеты, TUN, firewall. Журнал, unit и аргументы процессов исключены: могут содержать секреты.
 set -u -o pipefail
 
 PEER_PORT="${CSQTT_PEER_PORT:-46010}"
@@ -19,13 +19,6 @@ fi
 section() {
     printf '\n========== %s ==========' "$1"
     printf '\n'
-}
-
-redact() {
-    sed -E \
-        -e 's/((password|token|secret|authorization|cookie|api[_-]?key)[[:space:]]*[:=][[:space:]]*)[^[:space:];,]+/\1<redacted>/Ig' \
-        -e 's/(--password[[:space:]]+)[^[:space:]]+/\1<redacted>/g' \
-        -e 's#(csqtt://)[^@[:space:]]+@#\1<redacted>@#g'
 }
 
 safe() {
@@ -49,12 +42,10 @@ safe systemctl is-enabled csqtt.service
 safe systemctl show csqtt.service \
     -p LoadState -p ActiveState -p SubState -p Result -p MainPID -p ControlPID \
     -p NRestarts -p ExecMainCode -p ExecMainStatus -p RestartUSec -p Restart \
-    -p FragmentPath -p DropInPaths -p ControlGroup -p ExecStart -p ExecStartPre \
+    -p FragmentPath -p DropInPaths -p ControlGroup \
     -p EnvironmentFiles
-safe systemctl status csqtt.service --no-pager --full
 
-section 'unit definition'
-safe systemctl cat csqtt.service
+# Не выводим unit, Environment и журнал: они могут содержать credentials.
 
 section 'other CSQTT systemd units'
 safe systemctl list-units --all --type=service --no-legend --plain | awk 'tolower($0) ~ /csqtt/'
@@ -65,7 +56,7 @@ section 'CSQTT processes and owners'
 for pid in $(service_pids | sort -un); do
     [ -r "/proc/$pid/status" ] || continue
     printf '%s\n' "PID=$pid"
-    safe ps -p "$pid" -o pid,ppid,user,lstart,etime,stat,comm,args
+    safe ps -p "$pid" -o pid,ppid,user,lstart,etime,stat,comm
     printf 'exe='
     readlink "/proc/$pid/exe" 2>/dev/null || true
     printf 'cgroup:\n'
@@ -73,9 +64,9 @@ for pid in $(service_pids | sort -un); do
     printf 'parent:\n'
     parent="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
     if [ -n "$parent" ] && [ "$parent" -gt 1 ] 2>/dev/null; then
-        safe ps -p "$parent" -o pid,ppid,user,lstart,etime,stat,comm,args
+        safe ps -p "$parent" -o pid,ppid,user,lstart,etime,stat,comm
     fi
-done | redact
+done
 
 section 'CSQTT executable and runtime files'
 safe ls -l /usr/local/bin/csqtt /usr/local/lib/csqtt 2>/dev/null
@@ -118,12 +109,6 @@ if command -v docker >/dev/null 2>&1; then
     safe docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}' | grep -i csqtt || true
 fi
 safe find /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron -type f -print0 2>/dev/null | xargs -0r grep -lEi 'csqtt|/usr/local/bin/csqtt' 2>/dev/null
-
-section 'CSQTT journal, current boot'
-safe journalctl -u csqtt.service -b -n 300 --no-pager -o short-iso | redact
-
-section 'all current-boot CSQTT related journal lines'
-safe journalctl -b --no-pager -o short-iso | grep -Ei 'csqtt|tun-recover|network-up' | tail -n 300 | redact
 
 section 'result'
 printf 'Report complete. No service, firewall, database, or configuration was modified.\n'

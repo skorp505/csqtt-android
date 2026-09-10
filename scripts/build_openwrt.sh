@@ -4,6 +4,7 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$repo_dir/rust-client/Cargo.toml" | head -n 1)
 output_dir=${OPENWRT_OUTPUT_DIR:-$repo_dir/target/openwrt-packages}
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_dir/rust-client/target}
 
 declare -A openwrt_arch=(
     [x86_64-unknown-linux-musl]=x86_64
@@ -36,6 +37,6 @@ for target in "${targets[@]}"; do
         --manifest-path "$repo_dir/rust-client/Cargo.toml" \
         --release --locked --target "$target"
     "$repo_dir/openwrt/package.sh" \
-        "$repo_dir/rust-client/target/$target/release/client" \
+        "$CARGO_TARGET_DIR/$target/release/client" \
         "$architecture" "$version" "$output_dir"
 done

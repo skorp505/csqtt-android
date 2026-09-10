@@ -7,7 +7,7 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export TERM="${TERM:-xterm}"
 
-readonly SCRIPT_VERSION="2.1.12"
+readonly SCRIPT_VERSION="2.1.13"
 readonly LOG_FILE="/var/log/csqtt-install.log"
 readonly PEER_PORT="${CSQTT_PEER_PORT:-46010}"
 readonly SSH_PORT="${CSQTT_SSH_PORT:-22}"
@@ -41,7 +41,7 @@ readonly UPLOAD_OVERRIDES_FILE="/tmp/.csqtt-upload-overrides.json"
 readonly CSQTT_SYSCTL_FILE="/etc/sysctl.d/99-csqtt.conf"
 readonly CSQTT_UDP_SYSCTL_FILE="/etc/sysctl.d/99-csqtt-udp-buffers.conf"
 readonly IPT_COMMENT="CSQTT_MANAGED"
-readonly CSQTT_DOCKER_IMAGE="csqtt:2.1.12"
+readonly CSQTT_DOCKER_IMAGE="csqtt:2.1.13"
 readonly CSQTT_DOCKER_CONTAINER="csqtt"
 readonly XT_WAIT="${CSQTT_XT_WAIT:-2}"
 readonly START_STABILITY_SECONDS="${CSQTT_START_STABILITY_SECONDS:-1}"
@@ -778,13 +778,9 @@ csqtt_process_is_owned() {
     [ -r "/proc/\$pid/cmdline" ] || return 1
     executable="\$(readlink "/proc/\$pid/exe" 2>/dev/null || true)"
     case "\$executable" in
-        /usr/local/bin/csqtt|'/usr/local/bin/csqtt (deleted)'|/usr/local/lib/csqtt/*) return 0 ;;
+        /usr/local/bin/csqtt|'/usr/local/bin/csqtt (deleted)'|/usr/local/lib/csqtt/csqtt|'/usr/local/lib/csqtt/csqtt (deleted)') return 0 ;;
     esac
-    command_line="\$({ tr '\\0' ' ' < "/proc/\$pid/cmdline"; } 2>/dev/null || true)"
-    case " \$command_line " in
-        *" --config-dir \$CSQTT_CONFIG_DIR "*|*" /usr/local/bin/csqtt "*|*" /usr/local/lib/csqtt/"*) return 0 ;;
-        *) return 1 ;;
-    esac
+    return 1
 }
 
 release_owned_peer_port() {

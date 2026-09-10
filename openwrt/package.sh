@@ -36,6 +36,8 @@ Priority: optional
 Description: CSQTT client for OpenWrt routers
 EOF
 
+printf '/etc/config/csqtt\n' >"$work_dir/control/conffiles"
+
 printf '2.0\n' >"$work_dir/debian-binary"
 tar -C "$work_dir/control" -czf "$work_dir/control.tar.gz" .
 tar -C "$work_dir/data" -czf "$work_dir/data.tar.gz" .

@@ -34,12 +34,6 @@ run() {
     printf '[exit=%s]\n' "$status"
 }
 
-run_shell() {
-    printf '\n$ %s\n' "$1"
-    bash -o pipefail -c "$1" 2>&1
-    local status=$?
-    printf '[exit=%s]\n' "$status"
-}
 
 have() {
     command -v "$1" >/dev/null 2>&1
@@ -71,12 +65,11 @@ run uname -a
 [[ -r /etc/os-release ]] && run cat /etc/os-release
 run uptime
 
+# Unit, журнал и аргументы процессов не выводятся: могут содержать credentials.
 section "CSQTT service"
-run systemctl status csqtt --no-pager --full
+run systemctl is-active csqtt
 run systemctl show csqtt -p ActiveState -p SubState -p Result -p MainPID -p NRestarts -p ExecMainCode -p ExecMainStatus -p RestartUSec
-run systemctl cat csqtt
-run_shell "journalctl -u csqtt -b -n 200 --no-pager | sed -E 's/(\\[INIT\\] generated (main|web) password: ).*/\\1[REDACTED]/'"
-run ps -eo pid,ppid,user,stat,etimes,cmd --forest
+run ps -eo pid,ppid,user,stat,etimes,comm --forest
 
 section "Listening sockets"
 run ss -lunp
@@ -115,6 +108,6 @@ have firewall-cmd && run firewall-cmd --list-all
 section "Runtime files"
 run ls -ld /etc/csqtt /run/csqtt /usr/local/lib/csqtt
 run find /etc/csqtt -maxdepth 1 -mindepth 1 -printf '%M %u:%g %s %f\n'
-have docker && run docker ps -a --no-trunc
+have docker && run docker ps -a --format '{{.ID}} {{.Names}} {{.Image}} {{.Status}}'
 
 section "Report complete"

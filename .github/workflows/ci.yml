@@ -35,6 +35,7 @@ jobs:
       - run: cargo +1.97.1 clippy --manifest-path rust-server/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo +1.97.1 test --manifest-path rust-server/Cargo.toml --all-targets --locked
       - run: bash scripts/test_tunnel_subnet.sh
+      - run: python3 scripts/test_release_safety.py
 
   rust-server-cross:
     # Статические musl-бинарники для ARM VPS; amd64 собирается тем же скриптом при релизе.

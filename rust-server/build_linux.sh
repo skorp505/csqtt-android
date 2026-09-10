@@ -33,6 +33,13 @@ rust_target() {
     armv7) echo armv7-unknown-linux-musleabihf ;;
   esac
 }
+# Native execution requires a matching CPU architecture as well as Linux.
+can_run_target() {
+  case "$1:$2" in
+    x86_64-*-linux-*:amd64|aarch64-*-linux-*:arm64|armv7-*-linux-*:armv7) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 if [[ -z "$RUN_CHECKS" ]]; then
   if [[ -t 0 ]]; then
     read -rp "Запустить проверки и тесты (или их кросс-компиляцию) перед сборкой? [Y/n]: " REPLY
@@ -68,7 +75,7 @@ for ARCH in "${ARCHES[@]}"; do
   if [[ "$RUN_CHECKS" == 1 ]]; then
     cargo +1.97.1 zigbuild --all-targets --target "$TARGET" "${FEATURE_ARGS[@]}"
     CARGO_TARGET_DIR="$ROOT/build/linux-musl-check" RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild clippy --release --target "$TARGET" "${FEATURE_ARGS[@]}" --all-targets -- -D warnings
-    if [[ "$HOST" == *linux* && "$ARCH" == amd64 ]]; then
+    if can_run_target "$HOST" "$ARCH"; then
       echo "Running Linux musl tests..."
       CARGO_TARGET_DIR="$ROOT/build/linux-musl-tests" RUSTUP_TOOLCHAIN=1.97.1 cargo-zigbuild test --target "$TARGET" "${FEATURE_ARGS[@]}" --all-targets
     else
