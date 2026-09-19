@@ -1,0 +1,14 @@
+{
+    "luci-app-csqtt": {
+        "description": "Grant access to CSQTT LuCI procedures",
+        "read": {
+            "uci": [ "csqtt" ],
+            "service": [ "list" ]
+        },
+        "write": {
+            "uci": [ "csqtt" ],
+            "file": [ "exec" ],
+            "rc": [ "init" ]
+        }
+    }
+}

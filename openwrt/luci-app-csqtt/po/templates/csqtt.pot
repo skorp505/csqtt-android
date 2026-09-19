@@ -1,0 +1,174 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:153
+msgid "CSQTT — клиент VPN-туннеля"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:153
+msgid "Клиент создаёт системный VPN и передаёт трафик роутера/LAN через TURN."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:155
+msgid "Основные настройки"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:159
+msgid "Включить сервис"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:159
+msgid "Сервис стартует автоматически при загрузке роутера (init.d enable)."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:164
+msgid "Режим работы"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:164
+msgid "TUN — трафик с lan_device уходит в туннель. SOCKS5 — локальный прокси без изменения маршрутов."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:166
+msgid "TUN (интернет в LAN)"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:167
+msgid "SOCKS5 (локальный прокси)"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:172
+msgid "Сервер (peer)"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:172
+msgid "Адрес CSQTT-сервера на VPS в формате host:port."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:177
+msgid "Пароль подключения"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:177
+msgid "Пароль, заданный на сервере. При старте переносится в credentials.json (0600)."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:182
+msgid "VK-хеши"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:182
+msgid "Допустимые хеши VK-звонков через запятую."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:187
+msgid "Имя устройства"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:187
+msgid "Идентификатор роутера, видимый на сервере."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:192
+msgid "Потоков (workers)"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:196
+msgid "Маскировка (obfs)"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:196
+msgid "Тип RTP-потока, которым маскируется трафик."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:201
+msgid "TURN транспорт"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:205
+msgid "TURN хост"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:205
+msgid "Обычно пусто — адрес берётся из peer."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:207
+msgid "TURN порт"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:211
+msgid "TUN-интерфейс"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:215
+msgid "LAN интерфейс"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:215
+msgid "Трафик этого интерфейса будет идти через туннель."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:220
+msgid "Маршрутизировать трафик LAN"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:220
+msgid "Перехват трафика с lan_device в отдельную таблицу маршрутов."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:225
+msgid "Номер таблицы маршрутов"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:229
+msgid "SOCKS5 адрес прослушивания"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:229
+msgid "По умолчанию локальный 127.0.0.1:1080. Открывать на LAN — только с firewall-ограничениями."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:236
+msgid "CSQTT"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:239
+msgid "После изменения настроек нажмите «Сохранить и применить» — сервис перезапустится автоматически."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:248
+msgid "Просмотр логов сервиса (logread -e csqtt)."
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:122
+msgid "Работает"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:122
+msgid "Остановлен"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:122
+msgid "Отключён"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:146
+msgid "▶ Старт"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:146
+msgid "■ Стоп"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:147
+msgid "Включить автозапуск"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:147
+msgid "Отключить автозапуск"
+msgstr ""
+
+#: applications/luci-app-csqtt/htdocs/luci-static/resources/view/csqtt/main.js:151
+msgid "Показать логи"
+msgstr ""

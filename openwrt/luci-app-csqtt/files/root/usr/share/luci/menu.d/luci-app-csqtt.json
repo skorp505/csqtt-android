@@ -1,0 +1,13 @@
+{
+    "admin/services/csqtt": {
+        "title": "CSQTT",
+        "order": 40,
+        "action": {
+            "type": "view",
+            "path": "csqtt/main"
+        },
+        "depends": {
+            "acl": [ "luci-app-csqtt" ]
+        }
+    }
+}

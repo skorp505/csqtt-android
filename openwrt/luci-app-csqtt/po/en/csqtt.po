@@ -1,0 +1,135 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: en\n"
+"X-Generator: opencode\n"
+
+msgid "CSQTT — клиент VPN-туннеля"
+msgstr "CSQTT VPN tunnel client"
+
+msgid "Клиент создаёт системный VPN и передаёт трафик роутера/LAN через TURN."
+msgstr "Creates a system VPN and routes router/LAN traffic through TURN."
+
+msgid "Основные настройки"
+msgstr "General settings"
+
+msgid "Включить сервис"
+msgstr "Enable the service"
+
+msgid "Сервис стартует автоматически при загрузке роутера (init.d enable)."
+msgstr "Starts automatically on boot (init.d enable)."
+
+msgid "Режим работы"
+msgstr "Operating mode"
+
+msgid "TUN — трафик с lan_device уходит в туннель. SOCKS5 — локальный прокси без изменения маршрутов."
+msgstr "TUN sends traffic from lan_device into the tunnel. SOCKS5 is a local proxy that does not alter routing."
+
+msgid "TUN (интернет в LAN)"
+msgstr "TUN (Internet to LAN)"
+
+msgid "SOCKS5 (локальный прокси)"
+msgstr "SOCKS5 (local proxy)"
+
+msgid "Сервер (peer)"
+msgstr "Server (peer)"
+
+msgid "Адрес CSQTT-сервера на VPS в формате host:port."
+msgstr "CSQTT server address on the VPS in host:port form."
+
+msgid "Пароль подключения"
+msgstr "Connection password"
+
+msgid "Пароль, заданный на сервере. При старте переносится в credentials.json (0600)."
+msgstr "Password set on the server. Moved to credentials.json (0600) on start."
+
+msgid "VK-хеши"
+msgstr "VK hashes"
+
+msgid "Допустимые хеши VK-звонков через запятую."
+msgstr "Comma-separated allowed VK call hashes."
+
+msgid "Имя устройства"
+msgstr "Device name"
+
+msgid "Идентификатор роутера, видимый на сервере."
+msgstr "Router identifier, visible on the server."
+
+msgid "Потоков (workers)"
+msgstr "Workers"
+
+msgid "Маскировка (obfs)"
+msgstr "Obfuscation (obfs)"
+
+msgid "Тип RTP-потока, которым маскируется трафик."
+msgstr "RTP stream type used to disguise the traffic."
+
+msgid "TURN транспорт"
+msgstr "TURN transport"
+
+msgid "TURN хост"
+msgstr "TURN host"
+
+msgid "Обычно пусто — адрес берётся из peer."
+msgstr "Usually empty — taken from peer."
+
+msgid "TURN порт"
+msgstr "TURN port"
+
+msgid "TUN-интерфейс"
+msgstr "TUN interface"
+
+msgid "LAN интерфейс"
+msgstr "LAN interface"
+
+msgid "Трафик этого интерфейса будет идти через туннель."
+msgstr "Traffic of this interface will go through the tunnel."
+
+msgid "Маршрутизировать трафик LAN"
+msgstr "Route LAN traffic"
+
+msgid "Перехват трафика с lan_device в отдельную таблицу маршрутов."
+msgstr "Peg traffic from lan_device into a separate routing table."
+
+msgid "Номер таблицы маршрутов"
+msgstr "Routing table number"
+
+msgid "SOCKS5 адрес прослушивания"
+msgstr "SOCKS5 listen address"
+
+msgid "По умолчанию локальный 127.0.0.1:1080. Открывать на LAN — только с firewall-ограничениями."
+msgstr "Local 127.0.0.1:1080 by default. Exposing on LAN requires firewall restrictions."
+
+msgid "CSQTT"
+msgstr "CSQTT"
+
+msgid "После изменения настроек нажмите «Сохранить и применить» — сервис перезапустится автоматически."
+msgstr "After changing settings press Save & Apply — the service restarts automatically."
+
+msgid "Просмотр логов сервиса (logread -e csqtt)."
+msgstr "View service logs (logread -e csqtt)."
+
+msgid "Работает"
+msgstr "Running"
+
+msgid "Остановлен"
+msgstr "Stopped"
+
+msgid "Отключён"
+msgstr "Disabled"
+
+msgid "▶ Старт"
+msgstr "▶ Start"
+
+msgid "■ Стоп"
+msgstr "■ Stop"
+
+msgid "Включить автозапуск"
+msgstr "Enable auto-start"
+
+msgid "Отключить автозапуск"
+msgstr "Disable auto-start"
+
+msgid "Показать логи"
+msgstr "Show logs"
+
