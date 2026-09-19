@@ -23,12 +23,12 @@
 
 ## Актуальный релиз
 
-Версия: **2.1.11**. Android package: `csqtt.quic.amurcanov`.
+Версия: **2.1.13**. Android package: `csqtt.quic.amurcanov`.
 
 Каждый пользователь разворачивает собственный сервер и вводит его адрес в формате
 `host:46010`. Адрес и пароль нашей инфраструктуры в Git и Releases не публикуются.
-Для установки на большинство устройств используйте `CSQTT-2.1.11-universal.apk`
-из раздела Releases.
+Для установки на большинство устройств используйте универсальный `.apk`
+из раздела [Releases](https://github.com/skorp505/csqtt-android/releases).
 
 ## Возможности
 
@@ -116,6 +116,34 @@ SOCKS5. Поддерживаются:
 - Для OpenWrt 25.12+ используйте универсальный `.tar.gz`.
 - Для OpenWrt 24.10 можно использовать `.tar.gz` или готовый `.ipk`.
 - MIPS/MIPSel пока не поддерживаются.
+
+### Быстрая установка на роутер (одной строкой)
+
+Для OpenWrt 25.12+ (apk) и 24.10 (opkg) скрипт сам определит пакетный менеджер
+и архитектуру, скачает подходящие `.apk`/`.ipk` из последнего релиза и поставит
+клиент вместе с LuCI-панелью и зависимостями.
+
+```sh
+sh <(wget -O - https://raw.githubusercontent.com/skorp505/csqtt-android/main/install.sh)
+```
+
+Готовые сборки клиента текущего релиза:
+
+- `aarch64_cortex-a53` — Raspberry Pi 3/4 и другие 64-битные роутеры (`.apk`);
+- `aarch64_generic` — armsr/x86_64 VM (`.apk` и `.ipk`).
+
+Если для вашей архитектуры сборки нет, скрипт сообщит об этом — запросите её в
+[Issues](https://github.com/skorp505/csqtt-android/issues).
+
+После установки заполните `/etc/config/csqtt`, затем:
+
+```
+/etc/init.d/csqtt enable
+/etc/init.d/csqtt restart
+logread -e csqtt
+```
+
+Веб-панель: **LuCI → Службы (Services) → CSQTT**.
 
 ### Нужны тестировщики
 
