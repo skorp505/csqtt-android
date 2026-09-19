@@ -198,19 +198,18 @@ main() {
 
     cat <<EOF
 
-CSQTT установлен. Дальнейшие шаги:
+CSQTT установлен. Настройка — через веб-панель LuCI:
+  Службы (Services) -> CSQTT
 
-1. Настройте конфигурацию:
-   vi /etc/config/csqtt
+1. Укажите сервер (peer), пароль и при необходимости VK-хеши.
+2. Отметьте «Включить сервис» и нажмите «Сохранить и применить».
+3. Нажмите «▶ Старт» и «Показать логи» для проверки работы.
 
-2. Запустите сервис (с автозапуском):
-   /etc/init.d/csqtt enable
-   /etc/init.d/csqtt restart
-
-3. Проверьте работу:
-   logread -e csqtt
-
-Веб-панель: LuCI -> Службы (Services) -> CSQTT
+То же самое в консоли:
+  vi /etc/config/csqtt
+  /etc/init.d/csqtt enable
+  /etc/init.d/csqtt restart
+  logread -e csqtt
 EOF
 }
 
