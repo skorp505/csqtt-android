@@ -83,11 +83,11 @@ pkg_is_installed() {
 }
 
 get_arch() {
+    # DISTRIB_ARCH из /etc/openwrt_release — авторитетный повторяемый arch
+    # (apk --print-arch может вернуть общий aarch64, игнорируя Cortex-A53 tuning).
     local arch=""
-    if [ "$PKG_IS_APK" -eq 1 ]; then
-        arch=$(apk --print-arch 2>/dev/null)
-    fi
-    [ -n "$arch" ] || arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null)
+    arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null)
+    [ -n "$arch" ] || arch=$(apk --print-arch 2>/dev/null)
     [ -n "$arch" ] || arch=$(opkg print-architecture 2>/dev/null | tail -n1 | awk '{print $2}')
     [ -n "$arch" ] || { err "Не удалось определить архитектуру роутера."; exit 1; }
     echo "$arch"
