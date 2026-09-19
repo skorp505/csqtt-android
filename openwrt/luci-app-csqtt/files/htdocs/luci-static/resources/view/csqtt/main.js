@@ -84,11 +84,14 @@ return L.view.extend({
             class: 'csqtt-badge ' + (status.running ? 'running' : 'stopped')
         }, status.running ? 'Работает' : (enabled ? 'Остановлен' : 'Отключён'));
 
-        var meta = E('span', { class: 'csqtt-meta' }, [
-            E('strong', {}, enabled ? 'Автозапуск: включён' : 'Автозапуск: выключен'),
-            status.pid ? E('span', {}, ' · PID ' + status.pid) : null,
-            E('span', {}, ' · Режим: ' + (uci.get('csqtt', 'main', 'mode') || 'tun'))
-        ]);
+        var metaParts = [
+            E('strong', {}, enabled ? 'Автозапуск: включён' : 'Автозапуск: выключен')
+        ];
+        if (status.pid)
+            metaParts.push(E('span', {}, ' · PID ' + status.pid));
+        metaParts.push(E('span', {}, ' · Режим: ' + (uci.get('csqtt', 'main', 'mode') || 'tun')));
+
+        var meta = E('span', { class: 'csqtt-meta' }, metaParts);
 
         function makeBtn(text, cls, handler) {
             return E('button', {
@@ -225,25 +228,27 @@ return L.view.extend({
         socks5_listen.default = '127.0.0.1:1080';
         socks5_listen.depends('mode', 'socks5');
 
-        return E('div', { class: 'csqtt-container' }, [
-            E('style', STYLES),
-            E('h2', {}, 'CSQTT'),
-            E('p', { class: 'cbi-section-descr' },
-                'После изменения настроек нажмите «Сохранить и применить» — сервис перезапустится автоматически.'),
-            statusCard,
-            m.render(),
-            E('div', { class: 'cbi-section', style: 'margin-top:14px' }, [
-                E('div', { class: 'cbi-section-node' }, [
-                    E('div', { class: 'cbi-section-node-content' }, [
-                        E('div', { style: 'display:flex;align-items:center;gap:10px;' }, [
-                            E('div', { class: 'cbi-section-descr', style: 'margin:0;flex:1;' },
-                                'Просмотр логов сервиса (logread -e csqtt).'),
-                            logBtn
-                        ]),
-                        logBox
+        return Promise.resolve(m.render()).then(function (formNode) {
+            return E('div', { class: 'csqtt-container' }, [
+                E('style', STYLES),
+                E('h2', {}, 'CSQTT'),
+                E('p', { class: 'cbi-section-descr' },
+                    'После изменения настроек нажмите «Сохранить и применить» — сервис перезапустится автоматически.'),
+                statusCard,
+                formNode,
+                E('div', { class: 'cbi-section', style: 'margin-top:14px' }, [
+                    E('div', { class: 'cbi-section-node' }, [
+                        E('div', { class: 'cbi-section-node-content' }, [
+                            E('div', { style: 'display:flex;align-items:center;gap:10px;' }, [
+                                E('div', { class: 'cbi-section-descr', style: 'margin:0;flex:1;' },
+                                    'Просмотр логов сервиса (logread -e csqtt).'),
+                                logBtn
+                            ]),
+                            logBox
+                        ])
                     ])
                 ])
-            ])
-        ]);
+            ]);
+        });
     }
 });

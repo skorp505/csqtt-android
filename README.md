@@ -127,6 +127,12 @@ SOCKS5. Поддерживаются:
 sh <(wget -O - https://raw.githubusercontent.com/skorp505/csqtt-android/main/install.sh)
 ```
 
+Удаление (одной строкой, конфиг сохранится в `/etc/config/csqtt.bak`):
+
+```sh
+sh <(wget -O - https://raw.githubusercontent.com/skorp505/csqtt-android/main/uninstall.sh)
+```
+
 Готовые сборки клиента текущего релиза:
 
 - `aarch64_cortex-a53` — Raspberry Pi 3/4 и другие 64-битные роутеры (`.apk`);
