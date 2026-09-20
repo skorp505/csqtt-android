@@ -113,7 +113,7 @@ get_client_name() {
 get_panel_name() {
     local ver="$1"
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        echo "luci-app-csqtt-${ver}-r2_noarch.apk"
+        echo "luci-app-csqtt-${ver}-r3_noarch.apk"
     else
         echo "luci-app-csqtt_${ver}_all.ipk"
     fi

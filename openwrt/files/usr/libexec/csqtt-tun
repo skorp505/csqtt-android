@@ -3,6 +3,7 @@
 
 TABLE_DEFAULT=202
 RULE_PRIORITY=12000
+NFT_BASE="inet csqtt"
 
 config_value() {
 	uci -q get "csqtt.main.$1"
@@ -14,12 +15,12 @@ delete_firewall_rules() {
 	while iptables -w 5 -C FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
 		iptables -w 5 -D FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT
 	done
-	while iptables -w 5 -C FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
-		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT
+	while iptables -w 5 -C FORWARD -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
+		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT
 	done
-	while iptables -w 5 -t nat -C POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE 2>/dev/null; do
-		iptables -w 5 -t nat -D POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE
-	done
+	nft -f /dev/stdin 2>/dev/null <<EOF
+delete table $NFT_BASE
+EOF
 }
 
 device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
@@ -32,7 +33,7 @@ table="$(config_value route_table)"
 
 case "$1" in
 	up)
-		[ -n "$CSQTT_TUN_IP" ] || { logger -t csqtt "empty tunnel IP"; exit 1; }
+		[ -n "$CSQTT_TUN_IP" ] || exit 0
 		ip link set dev "$device" mtu 1380 up || exit 1
 		ip -4 address replace "$CSQTT_TUN_IP/32" dev "$device" || exit 1
 		if [ "$route_lan" = 1 ]; then
@@ -41,8 +42,17 @@ case "$1" in
 			ip -4 rule add priority "$RULE_PRIORITY" iif "$lan" lookup "$table" || exit 1
 			delete_firewall_rules "$device" "$lan"
 			iptables -w 5 -I FORWARD 1 -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
-			iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
-			iptables -w 5 -t nat -I POSTROUTING 1 -o "$device" -m comment --comment csqtt-openwrt -j MASQUERADE || exit 1
+			iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
+			nft -f /dev/stdin <<EOF
+add table $NFT_BASE
+table $NFT_BASE {
+	chain postrouting {
+		type nat hook postrouting priority 100;
+		policy accept;
+		oifname "$device" masquerade
+	}
+}
+EOF
 		fi
 		logger -t csqtt "configured $device as $CSQTT_TUN_IP/32; DNS $CSQTT_TUN_DNS"
 		;;

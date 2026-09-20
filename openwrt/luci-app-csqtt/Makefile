@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-csqtt
 PKG_VERSION:=2.1.13
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 
 LUCI_TITLE:=LuCI web panel for the CSQTT OpenWrt client
 LUCI_DESCRIPTION:=Web panel to configure the CSQTT client (TUN or SOCKS5) running on the router.
