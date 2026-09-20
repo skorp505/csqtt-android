@@ -98,8 +98,8 @@ get_client_name() {
     local kind="$1" arch="$2" ver="$3"
     if [ "$kind" = "apk" ]; then
         case "$arch" in
-            aarch64_cortex-a53) echo "csqtt-client-${ver}-r2_aarch64_cortex-a53.apk" ;;
-            aarch64_generic) echo "csqtt-client-${ver}-r2.apk" ;;
+            aarch64_cortex-a53) echo "csqtt-client-${ver}-r3_aarch64_cortex-a53.apk" ;;
+            aarch64_generic) echo "csqtt-client-${ver}-r3.apk" ;;
             *) echo "" ;;
         esac
     else
@@ -113,7 +113,7 @@ get_client_name() {
 get_panel_name() {
     local ver="$1"
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        echo "luci-app-csqtt-${ver}-r3_noarch.apk"
+        echo "luci-app-csqtt-${ver}-r4_noarch.apk"
     else
         echo "luci-app-csqtt_${ver}_all.ipk"
     fi
@@ -176,6 +176,13 @@ main() {
     PANEL_URL="https://github.com/$REPO/releases/download/v${VER}/${PANEL_NAME}"
 
     pkg_list_update || { err "Не удалось обновить список пакетов."; exit 1; }
+
+    # Зависимости клиента: клиент использует `iptables -m conntrack`
+    # и NAT MASQUERADE для туннеля TUN — их ставят iptables-nft + kmods.
+    msg "Устанавливаю зависимости (iptables-nft, kmod-ipt-conntrack, kmod-ipt-nat)..."
+    for dep in iptables-nft kmod-ipt-conntrack kmod-ipt-nat; do
+        pkg_install "$dep" || warn "Не удалось установить $dep (возможно, уже установлен или недоступен в репозитории)."
+    done
 
     mkdir -p "$DOWNLOAD_DIR"
     download "$CLIENT_URL" "$DOWNLOAD_DIR/$CLIENT_NAME"

@@ -3,7 +3,10 @@
         "description": "Grant access to CSQTT LuCI procedures",
         "read": {
             "uci": [ "csqtt" ],
-            "service": [ "list" ]
+            "service": [ "list" ],
+            "file": {
+                "/sbin/logread": [ "exec" ]
+            }
         },
         "write": {
             "uci": [ "csqtt" ],

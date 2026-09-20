@@ -27,6 +27,7 @@ device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
 lan="$(config_value lan_device)"
 route_lan="$(config_value route_lan)"
 table="$(config_value route_table)"
+[ -n "$route_lan" ] || route_lan=0
 [ -n "$device" ] || device=csqtt0
 [ -n "$lan" ] || lan=br-lan
 [ -n "$table" ] || table=$TABLE_DEFAULT

@@ -215,7 +215,7 @@ return L.view.extend({
 
         var route_lan = s.option(form.Flag, 'route_lan', 'Маршрутизировать трафик LAN',
             'Перехват трафика с lan_device в отдельную таблицу маршрутов.');
-        route_lan.default = '1';
+        route_lan.default = '0';
         route_lan.depends('mode', 'tun');
 
         var route_table = s.option(form.Value, 'route_table', 'Номер таблицы маршрутов');

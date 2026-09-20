@@ -266,7 +266,7 @@ return L.view.extend({
         lan_device.depends('mode', 'tun');
 
         var route_lan = s.option(form.Flag, 'route_lan', 'Маршрутизировать трафик LAN');
-        route_lan.default = '1';
+        route_lan.default = '0';
         route_lan.depends('mode', 'tun');
 
         var route_table = s.option(form.Value, 'route_table', 'Номер таблицы маршрутов');
