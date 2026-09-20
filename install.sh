@@ -98,8 +98,8 @@ get_client_name() {
     local kind="$1" arch="$2" ver="$3"
     if [ "$kind" = "apk" ]; then
         case "$arch" in
-            aarch64_cortex-a53) echo "csqtt-client-${ver}-r1_aarch64_cortex-a53.apk" ;;
-            aarch64_generic) echo "csqtt-client-${ver}-r1.apk" ;;
+            aarch64_cortex-a53) echo "csqtt-client-${ver}-r2_aarch64_cortex-a53.apk" ;;
+            aarch64_generic) echo "csqtt-client-${ver}-r2.apk" ;;
             *) echo "" ;;
         esac
     else
