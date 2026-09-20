@@ -38,14 +38,19 @@ var REFRESH_MS = 4000; // интервал автообновления стат
 /* ── Стили ───────────────────────────────────────────── */
 
 var STYLES =
-    '.csqtt-badge{display:inline-block;padding:3px 12px;border-radius:999px;' +
-        'font-size:0.78em;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;}' +
-    '.csqtt-badge.running{background:rgba(63,185,80,0.15);color:#3fb950;' +
+    '.csqtt-container{--acc:#8a5cf6;--acc2:#c084fc;}' +
+    '.csqtt-status{display:flex;flex-wrap:wrap;align-items:center;gap:10px;' +
+        'background:linear-gradient(180deg,rgba(180,140,255,0.07),rgba(180,140,255,0.02));' +
+        'border:1px solid rgba(138,92,246,0.22);border-radius:12px;' +
+        'padding:16px 18px;margin-bottom:14px;}' +
+    '.csqtt-badge{display:inline-block;padding:4px 12px;border-radius:999px;' +
+        'font-size:0.8em;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;}' +
+    '.csqtt-badge.running{background:rgba(63,185,80,0.16);color:#3fb950;' +
         'border:1px solid rgba(63,185,80,0.4);}' +
     '.csqtt-badge.stopped{background:rgba(139,148,158,0.12);color:#8b949e;' +
         'border:1px solid rgba(139,148,158,0.3);}' +
-    '.csqtt-meta{font-size:0.8em;color:#8b949e;}' +
-    '.csqtt-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:nowrap;}' +
+    '.csqtt-meta{font-size:0.82em;color:#8b949e;}' +
+    '.csqtt-actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;}' +
     '.csqtt-logwrap{margin-top:14px;}' +
     '.csqtt-loghead{display:flex;align-items:center;gap:10px;margin-bottom:6px;}' +
     '.csqtt-loghead .csqtt-logtitle{flex:1;font-size:0.85em;color:#8b949e;}';
@@ -95,7 +100,7 @@ return L.view.extend({
             badgeEl.className = 'csqtt-badge ' + (s.running ? 'running' : 'stopped');
             badgeEl.textContent = s.running ? 'Работает' : (en ? 'Остановлен' : 'Отключён');
             metaEl.textContent = '';
-            metaEl.appendChild(E('span', {}, en ? 'Автозапуск: включён' : 'Автозапуск: выключен'));
+            metaEl.appendChild(E('strong', {}, en ? 'Автозапуск: включён' : 'Автозапуск: выключен'));
             if (s.pid)
                 metaEl.appendChild(E('span', {}, ' · PID ' + s.pid));
             metaEl.appendChild(E('span', {}, ' · Режим: ' + (uci.get('csqtt', 'main', 'mode') || 'tun')));
@@ -119,7 +124,7 @@ return L.view.extend({
         }
 
         var startBtn = makeBtn('▶ Старт', 'cbi-button-apply', function () { return serviceAction('start'); });
-        var stopBtn  = makeBtn('Стоп', 'cbi-button-reset',  function () { return serviceAction('stop'); });
+        var stopBtn  = makeBtn('■ Стоп', 'cbi-button-reset',  function () { return serviceAction('stop'); });
         var enaBtn   = makeBtn('Включить автозапуск', 'cbi-button-save', function () { return serviceAction('enable'); });
         var disBtn   = makeBtn('Отключить автозапуск', 'cbi-button-reset', function () { return serviceAction('disable'); });
 
@@ -135,11 +140,21 @@ return L.view.extend({
                    'word-break:break-all;margin-top:6px;border:1px solid rgba(138,92,246,0.2);display:none;'
         });
 
+        var logTitle = E('span', { class: 'csqtt-logtitle' }, 'Просмотр логов сервиса (logread -e csqtt).');
+        function setLogMeta(lines) {
+            var stamp = new Date().toLocaleTimeString('ru-RU');
+            logTitle.textContent = 'Просмотр логов сервиса (logread -e csqtt).' +
+                (lines === -1 ? ' · logread недоступен' : ' · строк: ' + lines + ' · обновлено ' + stamp);
+        }
+
         function refreshLogs() {
             return callExec('/sbin/logread', [ '-e', 'csqtt' ]).then(function (res) {
+                var lines = (res || '').split('\n').filter(function (l) { return l.trim() !== ''; }).length;
                 logBox.textContent = res || '(записей с тегом csqtt нет)';
+                setLogMeta(lines);
             }).catch(function () {
                 logBox.textContent = '(logread недоступен — проверьте ACL)';
+                setLogMeta(-1);
             });
         }
 
@@ -169,8 +184,7 @@ return L.view.extend({
 
         var logWrap = E('div', { class: 'csqtt-logwrap' }, [
             E('div', { class: 'csqtt-loghead' }, [
-                E('span', { class: 'csqtt-logtitle' }, 'Просмотр логов сервиса (logread -e csqtt).'),
-                logBtn, offBtn
+                logTitle, logBtn, offBtn
             ]),
             logBox
         ]);

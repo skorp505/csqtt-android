@@ -75,9 +75,12 @@ start_service() {
 	procd_set_param stderr 1
 	procd_set_param limits core="0"
 	procd_close_instance
+
+	logger -t csqtt "started csqtt-client (mode=$mode, peer=$peer)"
 }
 
 stop_service() {
+	logger -t csqtt "stopping csqtt-client"
 	[ -x "$TUN_HOOK" ] && "$TUN_HOOK" down
 	rm -f "$CREDENTIALS_FILE"
 }
