@@ -268,7 +268,11 @@ return L.view.extend({
                     'После изменения настроек нажмите «Сохранить и применить» — сервис перезапустится автоматически.'),
                 statusCard,
                 formNode,
-                logWrap
+                logWrap,
+                E('div', { class: 'csqtt-footer' }, [
+                    E('span', { class: 'csqtt-footerver' },
+                        'Версия панели: 2.1.13-r3 · ver 25.12')
+                ])
             ]);
         });
 
