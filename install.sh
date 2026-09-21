@@ -14,7 +14,7 @@ set -eu
 REPO="skorp505/csqtt-android"
 REPO_API="https://api.github.com/repos/$REPO/releases/latest"
 # Запасной тег на случай недоступности GitHub API (rate limit / сеть)
-DEFAULT_TAG="v2.1.13-r4"
+DEFAULT_TAG="v2.1.13-r5"
 DOWNLOAD_DIR="/tmp/csqtt"
 COUNT=3
 

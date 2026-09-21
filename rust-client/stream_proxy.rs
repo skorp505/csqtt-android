@@ -89,9 +89,6 @@ pub async fn start(
     cancel: CancellationToken,
 ) -> Result<(SocketAddr, JoinHandle<()>)> {
     let requested: SocketAddr = bind.parse().context("invalid SOCKS5 bind address")?;
-    if !requested.ip().is_loopback() {
-        bail!("SOCKS5 listener must use a loopback address");
-    }
     let listener = TcpListener::bind(requested)
         .await
         .context("SOCKS5 bind failed")?;
