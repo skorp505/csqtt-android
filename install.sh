@@ -14,7 +14,7 @@ set -eu
 REPO="skorp505/csqtt-android"
 REPO_API="https://api.github.com/repos/$REPO/releases/latest"
 # Запасной тег на случай недоступности GitHub API (rate limit / сеть)
-DEFAULT_TAG="v2.1.13"
+DEFAULT_TAG="v2.1.13-r4"
 DOWNLOAD_DIR="/tmp/csqtt"
 COUNT=3
 
@@ -94,12 +94,12 @@ get_arch() {
 }
 
 get_client_name() {
-    # имя файла клиента для (apk|ipk, arch, version)
-    local kind="$1" arch="$2" ver="$3"
+    # имя файла клиента для (apk|ipk, arch, version, release-suffix)
+    local kind="$1" arch="$2" ver="$3" rel="$4"
     if [ "$kind" = "apk" ]; then
         case "$arch" in
-            aarch64_cortex-a53) echo "csqtt-client-${ver}-r3_aarch64_cortex-a53.apk" ;;
-            aarch64_generic) echo "csqtt-client-${ver}-r3.apk" ;;
+            aarch64_cortex-a53) echo "csqtt-client-${ver}-${rel}_aarch64_cortex-a53.apk" ;;
+            aarch64_generic) echo "csqtt-client-${ver}-${rel}.apk" ;;
             *) echo "" ;;
         esac
     else
@@ -155,9 +155,14 @@ main() {
     VER=${VER#v}
     [ -n "$VER" ] || VER=${DEFAULT_TAG#v}
     [ -n "$VER" ] || { err "Не удалось определить версию релиза."; exit 1; }
-    msg "Версия релиза: $VER"
+    # VER_FULL — полная версия (с суффиксом релиза), VER_NUM — версия бинарника, REL — суффикс
+    VER_FULL="$VER"
+    VER_NUM=${VER%%-*}
+    REL=${VER#*-}
+    [ "$REL" = "$VER_NUM" ] && REL="r4"   # тег без суффикса — подставляем актуальный релиз
+    msg "Версия релиза: $VER_FULL"
 
-    CLIENT_NAME=$(get_client_name "$kind" "$ARCH" "$VER")
+    CLIENT_NAME=$(get_client_name "$kind" "$ARCH" "$VER_NUM" "$REL")
     if [ -z "$CLIENT_NAME" ]; then
         err "Для архитектуры $ARCH сборка пока не опубликована."
         msg "Доступные сборки:"
@@ -166,14 +171,14 @@ main() {
         msg "Другие архитектуры можно заказать в Issues: https://github.com/$REPO/issues"
         exit 1
     fi
-    PANEL_NAME=$(get_panel_name "$VER")
+    PANEL_NAME=$(get_panel_name "$VER_NUM")
 
     if [ -n "$JSON" ]; then
         CLIENT_URL=$(get_url "$JSON" "$CLIENT_NAME")
         [ -n "$CLIENT_URL" ] || warn "Не нашёл ассет в релизе, пробую прямую ссылку."
     fi
-    [ -n "${CLIENT_URL:-}" ] || CLIENT_URL="https://github.com/$REPO/releases/download/v${VER}/${CLIENT_NAME}"
-    PANEL_URL="https://github.com/$REPO/releases/download/v${VER}/${PANEL_NAME}"
+    [ -n "${CLIENT_URL:-}" ] || CLIENT_URL="https://github.com/$REPO/releases/download/v${VER_FULL}/${CLIENT_NAME}"
+    PANEL_URL="https://github.com/$REPO/releases/download/v${VER_FULL}/${PANEL_NAME}"
 
     pkg_list_update || { err "Не удалось обновить список пакетов."; exit 1; }
 
@@ -200,6 +205,22 @@ main() {
         msg "Устанавливаю luci-app-csqtt..."
     fi
     pkg_install "$DOWNLOAD_DIR/$PANEL_NAME"
+
+    # Пост-установочный фикс: всегда ставим актуальный hook туннеля (csqtt-tun).
+    # У старых сборок (r3 и ранее) hook не знал про `inet fw4 forward` —
+    # пакеты из LAN шли на сброс в firewall OpenWrt 24.10+/fw4.
+    msg "Устанавливаю актуальный hook туннеля (csqtt-tun)..."
+    mkdir -p /usr/libexec
+    HOOK_URL="https://raw.githubusercontent.com/$REPO/main/openwrt/files/usr/libexec/csqtt-tun"
+    if fetch "$HOOK_URL" > /usr/libexec/csqtt-tun 2>/dev/null && [ -s /usr/libexec/csqtt-tun ] && grep -q 'inet fw4 forward' /usr/libexec/csqtt-tun; then
+        chmod 0755 /usr/libexec/csqtt-tun
+        msg "Hook обновлён."
+        if [ "$(uci -q get csqtt.main.enabled 2>/dev/null)" = "1" ]; then
+            /etc/init.d/csqtt restart 2>/dev/null && msg "Сервис перезапущен с новым hook."
+        fi
+    else
+        warn "Не удалось обновить hook — при включённом туннеле вручную проверьте правило fw4 (VPN -> LAN)!"
+    fi
 
     rm -rf "$DOWNLOAD_DIR"
 

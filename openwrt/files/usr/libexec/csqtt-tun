@@ -12,15 +12,26 @@ config_value() {
 delete_firewall_rules() {
 	local device="$1"
 	local lan="$2"
+	local tip
 	while iptables -w 5 -C FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
 		iptables -w 5 -D FORWARD -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT
 	done
 	while iptables -w 5 -C FORWARD -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT 2>/dev/null; do
 		iptables -w 5 -D FORWARD -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT
 	done
+	tip="$(ip -4 addr show dev "$device" scope global 2>/dev/null | awk '/inet/{print $2}' | cut -d/ -f1)"
+	if [ -n "$tip" ]; then
+		while iptables -w 5 -t nat -C POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j SNAT --to-source "$tip" 2>/dev/null; do
+			iptables -w 5 -t nat -D POSTROUTING -o "$device" -m comment --comment csqtt-openwrt -j SNAT --to-source "$tip"
+		done
+	fi
 	nft -f /dev/stdin 2>/dev/null <<EOF
 delete table $NFT_BASE
 EOF
+	local handle
+	for handle in $(nft -a list chain inet fw4 forward 2>/dev/null | grep 'csqtt-openwrt' | awk '{print $NF}'); do
+		nft delete rule inet fw4 forward handle "$handle" 2>/dev/null
+	done
 }
 
 device="${CSQTT_TUN_DEVICE:-$(config_value tun_device)}"
@@ -44,15 +55,10 @@ case "$1" in
 			delete_firewall_rules "$device" "$lan"
 			iptables -w 5 -I FORWARD 1 -i "$lan" -o "$device" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
 			iptables -w 5 -I FORWARD 1 -i "$device" -o "$lan" -m comment --comment csqtt-openwrt -j ACCEPT || exit 1
-			nft -f /dev/stdin <<EOF
-add table $NFT_BASE
-table $NFT_BASE {
-	chain postrouting {
-		type nat hook postrouting priority 100;
-		policy accept;
-		oifname "$device" masquerade
-	}
-}
+			iptables -w 5 -t nat -I POSTROUTING 1 -o "$device" -m comment --comment csqtt-openwrt -j SNAT --to-source "$CSQTT_TUN_IP" || exit 1
+			nft -f /dev/stdin <<EOF || exit 1
+insert rule inet fw4 forward iifname "$lan" oifname "$device" counter accept comment "csqtt-openwrt"
+insert rule inet fw4 forward iifname "$device" oifname "$lan" ct state established,related counter accept comment "csqtt-openwrt"
 EOF
 		fi
 		logger -t csqtt "configured $device as $CSQTT_TUN_IP/32; DNS $CSQTT_TUN_DNS"
