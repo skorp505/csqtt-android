@@ -16,7 +16,7 @@ use tokio::{
 
 pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
-const MAX_DATA: usize = 2_000;
+const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
 const MAX_GLOBAL_STREAMS: usize = 256;
 const MAX_SESSION_STREAMS: usize = 32;
@@ -161,9 +161,14 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
                 .iter()
                 .filter(|entry| entry.key().0 == session_id)
                 .count();
+            if app.proxy_streams.contains_key(&key) {
+                // A retransmitted duplicate of an OPEN that already lives in
+                // the table: acknowledging it again would send OPEN_ERR and
+                // kill a healthy stream, so the duplicate is ignored.
+                return Ok(());
+            }
             if app.proxy_streams.len() >= MAX_GLOBAL_STREAMS
                 || session_count >= MAX_SESSION_STREAMS
-                || app.proxy_streams.contains_key(&key)
             {
                 send_frame(
                     app,

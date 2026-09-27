@@ -185,7 +185,7 @@ impl PacketSink<'_> {
         &mut self,
         peer: SocketAddr,
         source_ip: Option<IpAddr>,
-        duplicate: bool,
+        extra_copies: usize,
         class: PacketClass,
         build: F,
     ) -> bool
@@ -209,31 +209,29 @@ impl PacketSink<'_> {
         let slot = &mut self.udp_tx[slot_id];
         slot.buffer = Some(buffer);
         slot.prepare_current(peer, source_ip);
-        let duplicate_id = if duplicate && self.free_udp_tx.len() > FEC_TX_SLOT_RESERVE {
-            self.free_udp_tx.pop_front().and_then(|duplicate_id| {
-                let Some(mut duplicate_buffer) = self.packet_pool.try_acquire() else {
-                    self.free_udp_tx.push_front(duplicate_id);
-                    return None;
-                };
-                let copied = self.udp_tx[slot_id]
-                    .buffer
-                    .as_ref()
-                    .is_some_and(|source| duplicate_buffer.copy_from(source.as_slice()));
-                if !copied {
-                    self.free_udp_tx.push_front(duplicate_id);
-                    return None;
-                }
-                let duplicate = &mut self.udp_tx[duplicate_id];
-                duplicate.buffer = Some(duplicate_buffer);
-                duplicate.prepare_current(peer, source_ip);
-                Some(duplicate_id)
-            })
-        } else {
-            None
-        };
         self.enqueue_udp(slot_id, class);
-        if let Some(duplicate_id) = duplicate_id {
+        let mut copies = 0usize;
+        while copies < extra_copies && self.free_udp_tx.len() > FEC_TX_SLOT_RESERVE {
+            let Some(duplicate_id) = self.free_udp_tx.pop_front() else {
+                break;
+            };
+            let Some(mut duplicate_buffer) = self.packet_pool.try_acquire() else {
+                self.free_udp_tx.push_front(duplicate_id);
+                break;
+            };
+            let copied = self.udp_tx[slot_id]
+                .buffer
+                .as_ref()
+                .is_some_and(|source| duplicate_buffer.copy_from(source.as_slice()));
+            if !copied {
+                self.free_udp_tx.push_front(duplicate_id);
+                break;
+            }
+            let duplicate = &mut self.udp_tx[duplicate_id];
+            duplicate.buffer = Some(duplicate_buffer);
+            duplicate.prepare_current(peer, source_ip);
             self.enqueue_udp(duplicate_id, class);
+            copies += 1;
         }
         true
     }

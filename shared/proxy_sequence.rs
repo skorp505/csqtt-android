@@ -1,5 +1,6 @@
-//! CSQPX2 integrity checks. A gap/reorder terminates the TCP stream; no retry
-//! layer is implied. Separate cursors are used for the two directions.
+//! CSQPX2 integrity checks. A gap/reorder terminates the TCP stream; a
+//! retransmitted duplicate copy of already-consumed bytes is dropped without
+//! advancing the cursor. Separate cursors are used for the two directions.
 use anyhow::{Result, bail};
 
 #[derive(Default)]
@@ -21,7 +22,12 @@ impl StreamSequence {
             bail!("missing proxy stream offset")
         };
         let offset = u64::from_be_bytes(header.try_into()?);
-        if offset != self.offset {
+        if offset < self.offset {
+            // Retransmitted copy of bytes already consumed: writing it again
+            // would corrupt the byte stream, so drop the duplicate.
+            return Ok(&[]);
+        }
+        if offset > self.offset {
             bail!(
                 "proxy stream gap or reorder: expected {}, received {offset}",
                 self.offset
@@ -54,16 +60,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_reordered_and_duplicate_chunks_are_rejected() {
+    fn gaps_are_rejected_and_duplicates_are_ignored() {
         let mut send = StreamSequence::default();
         let a = send.encode(b"abc").unwrap();
         let b = send.encode(b"def").unwrap();
         let c = send.encode(b"ghi").unwrap();
-        assert!(StreamSequence::default().decode(&b).is_err());
+        // A chunk beyond the expected offset is a gap/reorder: fatal.
         let mut receiver = StreamSequence::default();
         receiver.decode(&a).unwrap();
-        assert!(receiver.decode(&a).is_err());
         assert!(receiver.decode(&c).is_err());
+        // A retransmitted copy of an already-consumed chunk yields empty bytes.
+        let mut receiver = StreamSequence::default();
+        assert_eq!(receiver.decode(&a).unwrap(), b"abc");
+        assert!(receiver.decode(&a).unwrap().is_empty());
+        assert_eq!(receiver.decode(&b).unwrap(), b"def");
+        assert!(receiver.decode(&b).unwrap().is_empty());
+        assert_eq!(receiver.decode(&c).unwrap(), b"ghi");
     }
 
     #[test]

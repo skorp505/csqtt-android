@@ -40,6 +40,11 @@ type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
 type Aes128CtrCore = ctr::CtrCore<aes::Aes128, ctr::flavors::Ctr128BE>;
 
 pub(crate) const MAX_ACTIVE_SESSIONS: usize = 3072;
+
+/// Extra on-the-wire copies sent for proxied DATA frames server-side.
+/// Tolerant clients drop duplicates; this survives narrow relay gaps
+/// (1 extra copy in the future_data relay-loss fix proved insufficient).
+const PROXY_DATA_REDUNDANCY: usize = 3;
 const CONTROL_EVENT_CAPACITY: usize = 1024;
 const CONTROL_TASK_CAPACITY: usize = 128;
 const DB_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -3517,9 +3522,17 @@ fn send_legacy_plain(
 ) -> bool {
     let peer = session.peer;
     let local_ip = session.local_ip;
-    let duplicate = session.fec_profile == FecProfile::Safe
+    let proxy = selective_fec::is_server_duplicable_frame(plain);
+    let extra_copies = if proxy {
+        PROXY_DATA_REDUNDANCY
+    } else if session.fec_profile == FecProfile::Safe
         && selective_fec::should_duplicate(plain)
-        && session.fec_budget.allow();
+        && session.fec_budget.allow()
+    {
+        1
+    } else {
+        0
+    };
     let mut wire_len = 0usize;
     let kind = if session.is_srtp {
         CryptoKind::Srtp
@@ -3528,7 +3541,7 @@ fn send_legacy_plain(
     };
     let queue_started = profiler.all.begin(PerfStage::UdpQueue, plain.len());
     let sent =
-        sink.send_udp_with_duplicate_priority(peer, local_ip, duplicate, mode.class, |output| {
+        sink.send_udp_with_duplicate_priority(peer, local_ip, extra_copies, mode.class, |output| {
             let started = profiler.begin(kind, CryptoDirection::Wrap, plain.len());
             let wrapped = match wrap_legacy_into(
                 session,

@@ -431,7 +431,7 @@ async fn tcp_turn_transport_allocates_without_udp_fallback() {
     let mut packet = pool.acquire();
     packet.read_area()[..8].copy_from_slice(b"tcp-data");
     packet.set_read_len(8).unwrap();
-    allocation.send_with_duplicate(packet, false).await.unwrap();
+    allocation.send_with_duplicate(packet, 0).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3), data_rx)
         .await
         .unwrap()
@@ -528,7 +528,7 @@ async fn authenticated_flow_survives_pool_deficit_and_keeps_channel_data_zero_co
 
     held.read_area()[..8].copy_from_slice(b"outbound");
     held.set_read_len(8).unwrap();
-    allocation.send_with_duplicate(held, false).await.unwrap();
+    allocation.send_with_duplicate(held, 0).await.unwrap();
 
     let mut inbound = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
         .await
@@ -779,7 +779,7 @@ async fn channel_bind_error_closes_data_gate_but_preserves_refresh_zero_control_
     packet.read_area()[..7].copy_from_slice(b"blocked");
     packet.set_read_len(7).unwrap();
     let send_error = allocation
-        .send_with_duplicate(packet, false)
+        .send_with_duplicate(packet, 0)
         .await
         .unwrap_err();
     assert!(format!("{send_error:#}").contains("ChannelBind"));

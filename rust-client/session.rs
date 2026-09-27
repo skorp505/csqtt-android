@@ -31,7 +31,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -47,7 +47,7 @@ const DISCONNECT_SEND_TIMEOUT: Duration = Duration::from_millis(300);
 const DISCONNECT_ACK_TIMEOUT: Duration = Duration::from_millis(350);
 const DISCONNECT_CONTROL_ATTEMPTS: usize = 2;
 const WORKER_LATENCY_CAPACITY: usize = 16;
-const WORKER_PRIORITY_CAPACITY: usize = 24;
+const WORKER_PRIORITY_CAPACITY: usize = 64;
 const WORKER_BULK_CAPACITY: usize = 24;
 const WRITER_COMMAND_CAPACITY: usize = 16;
 const WRITER_COMMAND_CHECK_PACKETS: usize = 8;
@@ -97,6 +97,8 @@ pub struct SessionConfig {
     pub wrap_key: [u8; 32],
     pub get_config: bool,
     pub desired_count: usize,
+    pub dup_proxy: bool,
+    pub dup_proxy_copies: u8,
     pub repair: Arc<RepairState>,
 }
 
@@ -145,6 +147,9 @@ struct TransportShared {
     cipher: ObfsCipher,
     config: ObfsConfig,
     pool: Arc<PacketPool>,
+    dup_proxy: bool,
+    dup_proxy_copies: u8,
+    last_tx_ms: AtomicU64,
 }
 
 struct TransportWriter {
@@ -187,6 +192,7 @@ struct ReaderRuntime {
     events: Events,
     repair: Arc<RepairState>,
     shutdown: Arc<ShutdownCoordinator>,
+    worker_id: usize,
 }
 
 pub struct ShutdownCoordinator {
@@ -523,24 +529,42 @@ impl TransportWriter {
         Ok(())
     }
 
+    fn mark_tx(&self) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.shared
+            .last_tx_ms
+            .store(now_ms, Ordering::Relaxed);
+    }
+
     async fn send_packet(&mut self, mut packet: PacketBuf) -> Result<()> {
-        let duplicate = self.prepare_packet(&mut packet)?;
+        let extra = self.prepare_packet(&mut packet)?;
+        self.mark_tx();
         self.shared
             .allocation
-            .send_with_duplicate(packet, duplicate)
+            .send_with_duplicate(packet, extra as usize)
             .await?;
         Ok(())
     }
 
-    fn prepare_packet(&mut self, packet: &mut PacketBuf) -> Result<bool> {
-        let duplicate =
-            selective_fec::should_duplicate(packet.as_slice()) && self.fec_budget.allow();
+    fn prepare_packet(&mut self, packet: &mut PacketBuf) -> Result<u8> {
+        let proxy =
+            self.shared.dup_proxy && selective_fec::is_client_duplicable_frame(packet.as_slice());
+        let extra = if proxy {
+            self.shared.dup_proxy_copies.saturating_sub(1)
+        } else if selective_fec::should_duplicate(packet.as_slice()) && self.fec_budget.allow() {
+            1
+        } else {
+            0
+        };
         client_perf::measure_sampled(PerfStage::CryptoObfs, 64, || {
             self.shared
                 .cipher
                 .wrap(packet, &self.shared.config, &mut self.write_state)
         })?;
-        Ok(duplicate)
+        Ok(extra)
     }
 
     fn queue_data(&mut self, packet: PacketBuf) {
@@ -556,11 +580,13 @@ impl TransportWriter {
         }
 
         while let Some(mut packet) = self.pending_data.pop_front() {
-            if self.prepare_packet(&mut packet)? {
+            let extra = self.prepare_packet(&mut packet)?;
+            if extra > 0 {
                 self.flush_mmsg_data().await?;
+                self.mark_tx();
                 self.shared
                     .allocation
-                    .send_with_duplicate(packet, true)
+                    .send_with_duplicate(packet, extra as usize)
                     .await?;
                 continue;
             }
@@ -577,6 +603,7 @@ impl TransportWriter {
         if self.mmsg_data.is_empty() {
             return Ok(());
         }
+        self.mark_tx();
         self.shared
             .allocation
             .send_data_batch(&mut self.mmsg_data)
@@ -749,6 +776,9 @@ async fn run_allocated_session(
         cipher: ObfsCipher::new(config.wrap_key)?,
         config: ObfsConfig::new(config.mode),
         pool: runtime.pool.clone(),
+        dup_proxy: config.dup_proxy,
+        dup_proxy_copies: config.dup_proxy_copies.max(1),
+        last_tx_ms: AtomicU64::new(0),
     });
     let mut writer_transport = TransportWriter::new(shared.clone());
     let mut reader_transport = TransportReader::new(shared, turn_receiver);
@@ -822,6 +852,7 @@ async fn run_allocated_session(
             events: runtime.events.clone(),
             repair: config.repair.clone(),
             shutdown: runtime.shutdown.clone(),
+            worker_id: config.id,
         },
         session_cancel.clone(),
     ));
@@ -1092,13 +1123,36 @@ async fn reader_loop(
         events,
         repair,
         shutdown,
+        worker_id,
     } = runtime;
+    let mut last_inbound = tokio::time::Instant::now();
     loop {
         let packet = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Ok(()),
             result = transport.recv() => result?,
+            _ = tokio::time::sleep_until(last_inbound + PROXY_STALL_TIMEOUT) => {
+                // No inbound datagram for the full window. If this worker is
+                // actively pushing proxy frames (open SOCKS5 streams) that
+                // earn no reply, the relay leg died silently instead of
+                // erroring: fail fast so the supervisor re-registers via the
+                // next TURN endpoint. An idle wire with no streams is fine.
+                if dispatcher.worker_active_streams(worker_id) > 0
+                    && self_stall_likely(&transport)
+                {
+                    bail!(
+                        "proxy stream stall: outbound traffic with no reply for {PROXY_STALL_TIMEOUT:?}"
+                    );
+                }
+                last_inbound = tokio::time::Instant::now();
+                continue;
+            }
         };
+        last_inbound = tokio::time::Instant::now();
+        dispatcher
+            .stats()
+            .inbound_datagrams
+            .fetch_add(1, Ordering::Relaxed);
         if is_panel_restart_notice(packet.as_slice()) {
             events.panel_restart();
             continue;
@@ -1125,12 +1179,30 @@ async fn reader_loop(
         if is_control_response(packet.as_slice()) {
             continue;
         }
-        deliver_inbound_packet(&dispatcher, packet);
+        deliver_inbound_packet(&dispatcher, packet).await;
     }
 }
 
-fn deliver_inbound_packet(dispatcher: &Dispatcher, packet: PacketBuf) {
-    dispatcher.return_packet(packet);
+/// How long a worker may keep sending proxy frames without a single inbound
+/// datagram before the relay leg is declared dead and the session is torn
+/// down for re-registration (see [`reader_loop`]).
+const PROXY_STALL_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// True when this session has transmitted outbound data within the stall
+/// window: an actively writing wire that gets no reply is dead, while an
+/// idle wire simply waits for the next user request.
+fn self_stall_likely(transport: &TransportReader) -> bool {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let last_tx = transport.shared.last_tx_ms.load(Ordering::Relaxed);
+    last_tx != 0
+        && now_ms.saturating_sub(last_tx) <= PROXY_STALL_TIMEOUT.as_millis() as u64
+}
+
+async fn deliver_inbound_packet(dispatcher: &Dispatcher, packet: PacketBuf) {
+    dispatcher.return_packet(packet).await;
 }
 
 fn turn_endpoint_index(id: usize, cursor: usize, endpoint_count: usize) -> usize {
@@ -1203,6 +1275,8 @@ mod tests {
             get_config: false,
             desired_count: 18,
             repair: RepairState::new(18),
+            dup_proxy: false,
+            dup_proxy_copies: 2,
         };
         assert_eq!(
             select_turn_address(&addresses, &config).unwrap(),

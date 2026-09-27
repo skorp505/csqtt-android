@@ -16,6 +16,8 @@ pub struct Stats {
     pub total_bytes_up: AtomicI64,
     pub total_bytes_down: AtomicI64,
     pub active_connections: AtomicI32,
+    pub inbound_datagrams: AtomicI64,
+    pub outbound_datagrams: AtomicI64,
 }
 
 impl Stats {

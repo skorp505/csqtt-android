@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
-const MAX_DATA: usize = 2_000;
+const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
 const MAX_STREAMS: usize = 64;
 pub(crate) const OPEN: u8 = 1;
@@ -158,8 +158,15 @@ async fn handle_client(
     let target = read_handshake(&mut socket).await?;
     let (tx, mut rx) = mpsc::channel(64);
     streams.lock().await.insert(stream_id, tx);
+    let started = tokio::time::Instant::now();
+    let stats_arg = dispatcher.stats();
+    let ibound0 = stats_arg.inbound_datagrams.load(Ordering::Relaxed);
+    let obound0 = stats_arg.outbound_datagrams.load(Ordering::Relaxed);
+    let (mut down_frames, mut down_bytes) = (0u64, 0u64);
     let result = async {
-        dispatcher.send_proxy_frame(&pool, &encode_frame(OPEN, stream_id, &target))?;
+        dispatcher
+            .send_proxy_frame(&pool, &encode_frame(OPEN, stream_id, &target))
+            .await?;
         let opened = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
         match opened {
             Ok(Some(Inbound::Opened)) => write_reply(&mut socket, 0).await?,
@@ -179,12 +186,26 @@ async fn handle_client(
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                read = reader.read(&mut buffer) => match read? {
+read = reader.read(&mut buffer) => match read? {
                     0 => break,
-                    length => dispatcher.send_proxy_frame(&pool, &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?))?,
+                    length => {
+                        dispatcher.stats().total_bytes_up.fetch_add(length as i64, Ordering::Relaxed);
+                        dispatcher
+                            .send_proxy_frame(
+                                &pool,
+                                &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?),
+                            )
+                            .await?
+                    }
                 },
                 inbound = rx.recv() => match inbound {
-                    Some(Inbound::Data(data)) => writer.write_all(received.decode(&data)?).await?,
+                    Some(Inbound::Data(data)) => {
+                        let decoded = received.decode(&data)?;
+                        down_frames += 1;
+                        down_bytes += decoded.len() as u64;
+                        dispatcher.stats().total_bytes_down.fetch_add(decoded.len() as i64, Ordering::Relaxed);
+                        writer.write_all(decoded).await?;
+                    }
                     Some(Inbound::Closed | Inbound::Error(_)) | None => break,
                     Some(Inbound::Opened) => {}
                 },
@@ -192,8 +213,23 @@ async fn handle_client(
         }
         Result::<()>::Ok(())
     }.await;
+    eprintln!(
+        "[SXP] stream {stream_id} ended: down_frames={down_frames} down_bytes={down_bytes} ok={:?} dt={}ms ibound_delta={} obound_delta={}",
+        result.is_ok(),
+        started.elapsed().as_millis(),
+        stats_arg
+            .inbound_datagrams
+            .load(Ordering::Relaxed)
+            .saturating_sub(ibound0),
+        stats_arg
+            .outbound_datagrams
+            .load(Ordering::Relaxed)
+            .saturating_sub(obound0),
+    );
     streams.lock().await.remove(&stream_id);
-    let _ = dispatcher.send_proxy_frame(&pool, &encode_frame(CLOSE, stream_id, &[]));
+    let _ = dispatcher
+        .send_proxy_frame(&pool, &encode_frame(CLOSE, stream_id, &[]))
+        .await;
     result
 }
 
@@ -299,7 +335,7 @@ mod tests {
         .await
         .unwrap();
         let (latency, _latency_rx) = packet_channel(1, true);
-        let (priority, priority_rx) = packet_channel(1, true);
+        let (priority, mut priority_rx) = packet_channel(1, true);
         let (bulk, _bulk_rx) = packet_channel(1, true);
         dispatcher.register(WorkerChannels {
             id: 1,
@@ -311,30 +347,56 @@ mod tests {
         });
         dispatcher
             .send_proxy_frame(&pool, &encode_frame(OPEN, 1, b"target"))
+            .await
             .unwrap();
+        // The worker's single-slot priority queue is now full: the next frame
+        // must back-pressure (wait for a drain) rather than evict the pending
+        // OPEN or tear down the whole tunnel.
+        let worker_flow = {
+            let dispatcher = dispatcher.clone();
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                dispatcher
+                    .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"later bytes"))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
-            dispatcher
-                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"later bytes"))
-                .is_err()
+            !worker_flow.is_finished(),
+            "uplink overflow must back-pressure, not evict earlier bytes"
         );
-        let first = priority_rx.try_recv().unwrap();
-        assert_eq!(parse_frame(first.as_slice()).unwrap().kind, OPEN);
-        assert!(
-            dispatcher
-                .send_proxy_frame(&pool, &encode_frame(DATA, 1, b"must stay closed"))
-                .is_err()
-        );
+        let open = priority_rx.try_recv().unwrap();
+        assert_eq!(parse_frame(open.as_slice()).unwrap().kind, OPEN);
+        let _ = worker_flow.await.unwrap();
+        let data = priority_rx.try_recv().unwrap();
+        assert_eq!(parse_frame(data.as_slice()).unwrap().kind, DATA);
+        assert!(!cancel.is_cancelled());
 
-        let (tx, _rx) = mpsc::channel(1);
+        let (tx, mut rx) = mpsc::channel(1);
         dispatcher.set_proxy_frame_sender(tx).unwrap();
-        for _ in 0..2 {
+        let push_frame = |dispatcher: Arc<Dispatcher>, pool: Arc<PacketPool>| {
             let bytes = encode_frame(DATA, 1, b"response");
             let mut packet = pool.acquire();
             packet.set_read_len(bytes.len()).unwrap();
             packet.as_mut_slice().copy_from_slice(&bytes);
-            dispatcher.return_packet(packet);
-        }
-        assert!(cancel.is_cancelled());
+            async move { dispatcher.return_packet(packet).await }
+        };
+        // The single-slot frame pipe is now full: a second frame must
+        // back-pressure (wait for the first to drain) rather than evict it or
+        // tear down the whole tunnel.
+        push_frame(dispatcher.clone(), pool.clone()).await;
+        let second = tokio::spawn(push_frame(dispatcher.clone(), pool.clone()));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !second.is_finished(),
+            "overflow must back-pressure instead of evicting the first frame"
+        );
+        let first = rx.try_recv().unwrap();
+        assert_eq!(parse_frame(&first).unwrap().kind, DATA);
+        assert!(!cancel.is_cancelled());
+        second.await.unwrap();
+        assert_eq!(parse_frame(&rx.try_recv().unwrap()).unwrap().kind, DATA);
         dispatcher.shutdown().await;
     }
 
@@ -401,7 +463,7 @@ mod tests {
         let mut packet = pool.acquire();
         packet.set_read_len(opened.len()).unwrap();
         packet.as_mut_slice().copy_from_slice(&opened);
-        dispatcher.return_packet(packet);
+        dispatcher.return_packet(packet).await;
         let mut reply = [0u8; 10];
         client.read_exact(&mut reply).await.unwrap();
         assert_eq!(reply[1], 0);
@@ -421,7 +483,7 @@ mod tests {
         let mut packet = pool.acquire();
         packet.set_read_len(response.len()).unwrap();
         packet.as_mut_slice().copy_from_slice(&response);
-        dispatcher.return_packet(packet);
+        dispatcher.return_packet(packet).await;
         let mut body = [0u8; 5];
         client.read_exact(&mut body).await.unwrap();
         assert_eq!(&body, b"world");

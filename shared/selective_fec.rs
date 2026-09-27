@@ -48,7 +48,7 @@ impl Default for Budget {
 
 #[inline(always)]
 pub fn should_duplicate(packet: &[u8]) -> bool {
-    if is_control(packet) {
+    if is_control(packet) || is_proxy_frame(packet) {
         return true;
     }
     match packet.first().map(|byte| byte >> 4) {
@@ -66,6 +66,29 @@ fn is_control(packet: &[u8]) -> bool {
         || packet == b"READY_OK"
         || packet.starts_with(b"DENIED:")
         || packet.starts_with(b"DISCONNECT:")
+}
+
+#[inline(always)]
+pub fn is_proxy_frame(packet: &[u8]) -> bool {
+    // Only DATA frames carry stream bytes; OPEN/CLOSE/OPEN_OK/OPEN_ERR are
+    // idempotency-sensitive and must stay single-shot.
+    packet.starts_with(b"CSQPX2") && packet.get(6) == Some(&4)
+}
+
+/// Uplink frames the client may safely retransmit: the server treats a
+/// repeated OPEN as idempotent, duplicate CLOSE as a no-op, and duplicate
+/// DATA as already-consumed bytes.
+#[inline(always)]
+pub fn is_client_duplicable_frame(packet: &[u8]) -> bool {
+    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(1 | 4 | 5))
+}
+
+/// Downlink frames the server may safely retransmit: the client ignores a
+/// repeated OPEN_OK and drops duplicate DATA. CLOSE stays single-shot so a
+/// stray retransmission can never truncate a live stream.
+#[inline(always)]
+pub fn is_server_duplicable_frame(packet: &[u8]) -> bool {
+    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(2 | 4))
 }
 
 #[derive(Clone, Copy)]

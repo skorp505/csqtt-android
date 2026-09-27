@@ -418,7 +418,7 @@ impl TurnAllocation {
         Ok(())
     }
 
-    pub async fn send_with_duplicate(&self, mut packet: PacketBuf, duplicate: bool) -> Result<()> {
+    pub async fn send_with_duplicate(&self, mut packet: PacketBuf, extra_copies: usize) -> Result<()> {
         self.ensure_open()?;
         let channel = self.shared.channel.load(Ordering::Acquire);
         if channel == 0 {
@@ -436,7 +436,7 @@ impl TurnAllocation {
                 )
                 .await
                 .context("TURN UDP send")?;
-                if duplicate {
+                for _ in 0..extra_copies {
                     let _ = socket.try_send(packet.as_slice());
                 }
             }

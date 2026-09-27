@@ -85,6 +85,45 @@ impl PacketSender {
         self.send(packet, true)
     }
 
+    /// Block the caller until the queue drains, the receiver is dropped, or
+    /// the runtime is cancelled. Returns `Err(packet)` when the packet can
+    /// never be delivered.
+    pub async fn send_awaiting(
+        &self,
+        packet: PacketBuf,
+        cancel: &CancellationToken,
+    ) -> std::result::Result<(), PacketBuf> {
+        let mut packet = packet;
+        loop {
+            if cancel.is_cancelled() {
+                return Err(packet);
+            }
+            if self.shared.state.load(Ordering::Acquire) & QUEUE_ACTIVE == 0 {
+                return Err(packet);
+            }
+            if let Err(pending) = self.try_send(packet) {
+                packet = pending;
+                if !self.shared.receiver_open.load(Ordering::Acquire) {
+                    return Err(packet);
+                }
+                let notified = self.shared.notify.notified();
+                if let Err(pending) = self.try_send(packet) {
+                    packet = pending;
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => return Err(packet),
+                        _ = notified => {}
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                    }
+                } else {
+                    return Ok(());
+                }
+            } else {
+                return Ok(());
+            }
+        }
+    }
+
     fn send(&self, packet: PacketBuf, force: bool) -> std::result::Result<(), PacketBuf> {
         client_perf::measure_sampled(PerfStage::PacketQueue, 128, || {
             self.send_inner(packet, force)
@@ -266,6 +305,7 @@ pub struct Dispatcher {
     return_priority_tx: PacketSender,
     return_tx: PacketSender,
     scheduler: StripedScheduler,
+    stats: Arc<Stats>,
     cancel: CancellationToken,
     tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     proxy_frames: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>>,
@@ -292,6 +332,7 @@ impl Dispatcher {
             return_priority_tx,
             return_tx,
             scheduler: StripedScheduler::new(),
+            stats: stats.clone(),
             cancel: cancel.clone(),
             tasks: tokio::sync::Mutex::new(Vec::new()),
             proxy_frames: OnceLock::new(),
@@ -417,14 +458,25 @@ impl Dispatcher {
             .cloned()
     }
 
-    pub fn return_packet(&self, packet: PacketBuf) {
+    /// Number of live SOCKS5 proxy streams currently routed through `id`.
+    /// Used by the transport stall detector to distinguish a silently dead
+    /// relay leg (active streams, no replies) from a genuinely idle wire.
+    pub fn worker_active_streams(&self, id: usize) -> usize {
+        self.proxy_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .filter(|(worker, _)| *worker == id)
+            .count()
+    }
+
+    pub async fn return_packet(&self, packet: PacketBuf) {
         if crate::stream_proxy::is_frame(packet.as_slice()) {
-            if let Some(sender) = self.proxy_frames.get()
-                && sender.try_send(packet.as_slice().to_vec()).is_err()
-            {
-                // These are TCP bytes, not independently discardable IP packets.
-                // Terminate the tunnel rather than silently corrupting every stream.
-                self.cancel.cancel();
+            if let Some(sender) = self.proxy_frames.get() {
+                // Async backpressure: wait for the SOCKS5 proxy to drain its
+                // frame queue instead of dropping TCP bytes or tearing down
+                // the whole tunnel.
+                let _ = sender.send(packet.as_slice().to_vec()).await;
             }
             return;
         }
@@ -444,49 +496,90 @@ impl Dispatcher {
             .map_err(|_| anyhow::anyhow!("SOCKS5 frame receiver already configured"))
     }
 
-    pub fn send_proxy_frame(&self, pool: &Arc<PacketPool>, frame: &[u8]) -> Result<()> {
+    pub fn stats(&self) -> Arc<Stats> {
+        self.stats.clone()
+    }
+
+    pub async fn send_proxy_frame(&self, pool: &Arc<PacketPool>, frame: &[u8]) -> Result<()> {
         let (kind, stream_id) = crate::stream_proxy::frame_route(frame)
             .ok_or_else(|| anyhow::anyhow!("invalid SOCKS5 frame"))?;
         let workers = self.workers.load();
-        let mut routes = self
-            .proxy_routes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let route = if kind == crate::stream_proxy::OPEN {
-            let worker = workers
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
-            routes.insert(stream_id, (worker.id, worker.incarnation_id));
-            (worker.id, worker.incarnation_id)
-        } else {
-            routes
-                .get(&stream_id)
-                .copied()
-                .ok_or_else(|| anyhow::anyhow!("SOCKS5 carrier is unavailable"))?
+        let route = {
+            let mut routes = self
+                .proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let route = if kind == crate::stream_proxy::OPEN {
+                let worker = workers
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
+                let route = (worker.id, worker.incarnation_id);
+                routes.insert(stream_id, route);
+                route
+            } else {
+                routes
+                    .get(&stream_id)
+                    .copied()
+                    .ok_or_else(|| anyhow::anyhow!("SOCKS5 carrier is unavailable"))?
+            };
+            if workers
+                .iter()
+                .any(|worker| (worker.id, worker.incarnation_id) == route)
+            {
+                Some(route)
+            } else {
+                if kind != crate::stream_proxy::OPEN {
+                    routes.remove(&stream_id);
+                }
+                None
+            }
         };
-        let Some(worker) = workers
-            .iter()
-            .find(|worker| (worker.id, worker.incarnation_id) == route)
-        else {
-            routes.remove(&stream_id);
+        let Some(route) = route else {
             bail!("SOCKS5 carrier was replaced");
         };
         let Some(mut packet) = pool.try_acquire() else {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
             bail!("packet pool exhausted");
         };
         packet.set_read_len(frame.len())?;
         packet.as_mut_slice().copy_from_slice(frame);
-        let result = worker
+        let Some(worker) = workers
+            .iter()
+            .find(|worker| (worker.id, worker.incarnation_id) == route)
+        else {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
+            bail!("SOCKS5 carrier was replaced");
+        };
+        // Async backpressure: wait for the worker to drain its priority queue
+        // rather than dropping TCP bytes or tearing down the whole tunnel.
+        if worker
             .priority
-            .try_send(packet)
-            .map_err(|_| anyhow::anyhow!("CSQTT transport queue is unavailable"));
-        if kind == crate::stream_proxy::CLOSE || result.is_err() {
-            routes.remove(&stream_id);
+            .send_awaiting(packet, &self.cancel)
+            .await
+            .is_err()
+        {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
+            bail!("CSQTT transport queue is unavailable");
         }
-        if result.is_err() {
-            self.cancel.cancel();
+        self.stats
+            .outbound_datagrams
+            .fetch_add(1, Ordering::Relaxed);
+        if kind == crate::stream_proxy::CLOSE {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
         }
-        result
+        Ok(())
     }
 
     pub async fn shutdown(&self) {
@@ -1102,6 +1195,7 @@ mod tests {
                 return_priority_tx,
                 return_tx,
                 scheduler: StripedScheduler::new(),
+                stats: Arc::new(Stats::default()),
                 cancel: CancellationToken::new(),
                 tasks: tokio::sync::Mutex::new(Vec::new()),
                 proxy_frames: OnceLock::new(),
@@ -1325,12 +1419,12 @@ mod tests {
     async fn direct_downlink_preserves_late_tcp_retransmit() {
         let (dispatcher, _return_latency_rx, _return_priority_rx, return_rx) = test_dispatcher();
         let pool = PacketPool::new(4);
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 0));
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 2_320));
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 0)).await;
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 2_320)).await;
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 0);
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 2_320);
         tokio::time::advance(Duration::from_millis(81)).await;
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 1_160));
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 1_160)).await;
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 1_160);
         assert_eq!(pool.available(), pool.capacity());
     }
@@ -1339,8 +1433,8 @@ mod tests {
     async fn direct_downlink_splits_latency_and_bulk_returns() {
         let (dispatcher, return_latency_rx, _return_priority_rx, return_rx) = test_dispatcher();
         let pool = PacketPool::new(4);
-        dispatcher.return_packet(tcp_packet_len(&pool, 50_000, 7, 96));
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 8));
+        dispatcher.return_packet(tcp_packet_len(&pool, 50_000, 7, 96)).await;
+        dispatcher.return_packet(tcp_packet(&pool, 50_000, 8)).await;
         assert_eq!(packet_sequence(&return_latency_rx.try_recv().unwrap()), 7);
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 8);
     }
@@ -1759,7 +1853,7 @@ mod tests {
             let mut packet = pool.acquire();
             packet.set_read_len(1).unwrap();
             packet.as_mut_slice()[0] = expected as u8 + 0x80;
-            dispatcher.return_packet(packet);
+            dispatcher.return_packet(packet).await;
         }
         let mut buffer = [0u8; 8];
         for expected in 0..udp_batch::MAX_DATAGRAMS {

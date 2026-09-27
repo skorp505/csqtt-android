@@ -97,6 +97,8 @@ pub struct RuntimeParams {
     pub device_id: Arc<str>,
     pub password: Arc<str>,
     pub workers: usize,
+    pub dup_proxy: bool,
+    pub dup_proxy_copies: u8,
 }
 
 pub struct GroupContext {
@@ -653,6 +655,8 @@ async fn worker_loop(
             wrap_key: context.params.wrap_key,
             get_config,
             desired_count: context.params.workers,
+            dup_proxy: context.params.dup_proxy,
+            dup_proxy_copies: context.params.dup_proxy_copies,
             repair: context.repair.clone(),
             turn_endpoint_cursor,
         };

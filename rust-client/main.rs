@@ -121,6 +121,10 @@ struct Arguments {
     tun_config_hook: String,
     #[arg(long, default_value = "")]
     socks5: String,
+    #[arg(long, default_value_t = false, help = "Duplicate SOCKS5 DATA frames to survive UDP loss")]
+    dup_proxy: bool,
+    #[arg(long, default_value_t = 2, help = "Total copies for proxied frames (2 = 1 data + 1 duplicate)")]
+    dup_proxy_copies: u8,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
     #[arg(long, default_value_t = false)]
@@ -334,6 +338,8 @@ async fn run(arguments: Arguments) -> Result<()> {
         device_id: Arc::from(arguments.device_id.as_str()),
         password: Arc::from(arguments.password.as_str()),
         workers,
+        dup_proxy: arguments.dup_proxy,
+        dup_proxy_copies: arguments.dup_proxy_copies,
     });
     print_configuration(
         &arguments,
@@ -774,7 +780,11 @@ fn start_parent_monitor(cancel: CancellationToken) -> tokio::task::JoinHandle<()
                     _ = cancel.cancelled() => return,
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 }
-                if unsafe { libc::getppid() } != parent {
+                let current = unsafe { libc::getppid() };
+                if current != parent {
+                    crate::log_error!(
+                        "[КЛИЕНТ] Родитель изменился ({parent} -> {current}), выход"
+                    );
                     cancel.cancel();
                     return;
                 }
