@@ -85,10 +85,11 @@ pub fn is_client_duplicable_frame(packet: &[u8]) -> bool {
 
 /// Downlink frames the server may safely retransmit: the client ignores a
 /// repeated OPEN_OK and drops duplicate DATA. CLOSE stays single-shot so a
-/// stray retransmission can never truncate a live stream.
+/// stray retransmission can never truncate a live stream. OPEN_ERR is also
+/// idempotent: once the stream is gone a second copy is simply dropped.
 #[inline(always)]
 pub fn is_server_duplicable_frame(packet: &[u8]) -> bool {
-    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(2 | 4))
+    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(2 | 3 | 4))
 }
 
 #[derive(Clone, Copy)]
@@ -232,6 +233,22 @@ mod tests {
         let mut fragmented = ipv4(17, &udp(40000, 53, 20));
         fragmented[6..8].copy_from_slice(&1u16.to_be_bytes());
         assert!(!should_duplicate(&fragmented));
+    }
+
+    #[test]
+    fn server_duplicates_ok_err_data_only() {
+        let frame = |ty: u8| {
+            let mut f = b"CSQPX2".to_vec();
+            f.push(ty);
+            f.extend_from_slice(&[0u8; 8]);
+            f.push(1);
+            f
+        };
+        assert!(is_server_duplicable_frame(&frame(2)));
+        assert!(is_server_duplicable_frame(&frame(3)));
+        assert!(is_server_duplicable_frame(&frame(4)));
+        assert!(!is_server_duplicable_frame(&frame(1)));
+        assert!(!is_server_duplicable_frame(&frame(5)));
     }
 
     #[test]
