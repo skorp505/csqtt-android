@@ -582,6 +582,54 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// Send a SOCKS5 OPEN frame, selecting the carrier worker by hint.
+    ///
+    /// The ordinary `send_proxy_frame` always routes OPENs through the first
+    /// carrier, so a degraded first carrier stalls every new connection right
+    /// at the handshake. Callers may retry with an increasing `worker_hint`
+    /// (modulo the number of live carriers) to fail over to a healthy carrier.
+    pub async fn send_proxy_open(
+        &self,
+        pool: &Arc<PacketPool>,
+        frame: &[u8],
+        worker_hint: usize,
+    ) -> Result<()> {
+        let (kind, stream_id) = crate::stream_proxy::frame_route(frame)
+            .ok_or_else(|| anyhow::anyhow!("invalid SOCKS5 frame"))?;
+        if kind != crate::stream_proxy::OPEN {
+            anyhow::bail!("send_proxy_open requires an OPEN frame");
+        }
+        let workers = self.workers.load();
+        let worker = workers.get(worker_hint % workers.len().max(1)).ok_or_else(|| {
+            anyhow::anyhow!("CSQTT transport is not ready")
+        })?;
+        let route = (worker.id, worker.incarnation_id);
+        self.proxy_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(stream_id, route);
+        let Some(mut packet) = pool.try_acquire() else {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
+            bail!("packet pool exhausted");
+        };
+        packet.set_read_len(frame.len())?;
+        packet.as_mut_slice().copy_from_slice(frame);
+        if worker.priority.send_awaiting(packet, &self.cancel).await.is_err() {
+            self.proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&stream_id);
+            bail!("CSQTT transport queue is unavailable");
+        }
+        self.stats
+            .outbound_datagrams
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         self.cancel.cancel();
         for task in self.tasks.lock().await.drain(..) {

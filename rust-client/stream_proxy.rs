@@ -164,13 +164,30 @@ async fn handle_client(
     let obound0 = stats_arg.outbound_datagrams.load(Ordering::Relaxed);
     let (mut down_frames, mut down_bytes) = (0u64, 0u64);
     let result = async {
-        dispatcher
-            .send_proxy_frame(&pool, &encode_frame(OPEN, stream_id, &target))
-            .await?;
-        let opened = tokio::time::timeout(Duration::from_secs(20), rx.recv()).await;
+        let open_frame = encode_frame(OPEN, stream_id, &target);
+        let spread_base = (stream_id & 0xffff) as usize;
+        let mut opened = None;
+        let mut attempt = 0u64;
+        let open_deadline = tokio::time::Instant::now() + Duration::from_secs(9);
+        while tokio::time::Instant::now() < open_deadline {
+            dispatcher
+                .send_proxy_open(&pool, &open_frame, spread_base.wrapping_add(attempt as usize))
+                .await?;
+            match tokio::time::timeout(Duration::from_millis(2000), rx.recv()).await {
+                Ok(Some(Inbound::Opened)) => {
+                    opened = Some(Inbound::Opened);
+                    break;
+                }
+                Ok(Some(Inbound::Error(code))) => {
+                    opened = Some(Inbound::Error(code));
+                    break;
+                }
+                _ => attempt += 1,
+            }
+        }
         match opened {
-            Ok(Some(Inbound::Opened)) => write_reply(&mut socket, 0).await?,
-            Ok(Some(Inbound::Error(code))) => {
+            Some(Inbound::Opened) => write_reply(&mut socket, 0).await?,
+            Some(Inbound::Error(code)) => {
                 write_reply(&mut socket, code).await?;
                 bail!("remote SOCKS5 connect failed");
             }
