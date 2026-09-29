@@ -309,6 +309,7 @@ pub struct Dispatcher {
     cancel: CancellationToken,
     tasks: tokio::sync::Mutex<Vec<JoinHandle<()>>>,
     proxy_frames: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>>,
+    proxy_abort: OnceLock<tokio::sync::mpsc::Sender<u64>>,
     proxy_routes: Mutex<HashMap<u64, (usize, u64)>>,
 }
 
@@ -336,6 +337,7 @@ impl Dispatcher {
             cancel: cancel.clone(),
             tasks: tokio::sync::Mutex::new(Vec::new()),
             proxy_frames: OnceLock::new(),
+            proxy_abort: OnceLock::new(),
             proxy_routes: Mutex::new(HashMap::new()),
         });
         if let Some(source) = tun_source {
@@ -438,10 +440,36 @@ impl Dispatcher {
             interleave_turn_paths(&mut updated);
             Arc::new(updated)
         });
-        self.proxy_routes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|_, route| *route != (id, incarnation_id));
+        let aborted = {
+            let mut routes = self
+                .proxy_routes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dead_route = (id, incarnation_id);
+            let dead: Vec<u64> = routes
+                .iter()
+                .filter_map(|(&stream_id, &route)| (route == dead_route).then_some(stream_id))
+                .collect();
+            routes.retain(|_, route| *route != dead_route);
+            dead
+        };
+        // Streams pinned to the vanished carrier would otherwise sit in a
+        // silent socket wait indefinitely (target still answers on the server,
+        // so no CLOSE ever comes). Nudge the SOCKS5 proxy to reset them so the
+        // browser fails fast and reopens on a surviving carrier.
+        if let Some(sender) = self.proxy_abort.get()
+            && !aborted.is_empty()
+        {
+            for stream_id in aborted {
+                let _ = sender.try_send(stream_id);
+            }
+        }
+    }
+
+    pub fn set_proxy_abort(&self, sender: tokio::sync::mpsc::Sender<u64>) -> Result<()> {
+        self.proxy_abort
+            .set(sender)
+            .map_err(|_| anyhow::anyhow!("SOCKS5 proxy abort receiver already configured"))
     }
 
     #[cfg(test)]
@@ -1247,6 +1275,7 @@ mod tests {
                 cancel: CancellationToken::new(),
                 tasks: tokio::sync::Mutex::new(Vec::new()),
                 proxy_frames: OnceLock::new(),
+                proxy_abort: OnceLock::new(),
                 proxy_routes: Mutex::new(HashMap::new()),
             }),
             return_latency_rx,

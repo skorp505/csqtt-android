@@ -20,15 +20,29 @@ const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
 const MAX_GLOBAL_STREAMS: usize = 256;
 const MAX_SESSION_STREAMS: usize = 32;
+/// How long a CSQPX2 reorder hole may stay open before the stream is reset.
+const DATA_HOLE_PATIENCE: Duration = Duration::from_secs(6);
+/// Absolute quiet timeout for the whole stream (both directions idle). Bounds
+/// ghosts left by failed open attempts and targets that silently stopped.
+const DATA_QUIET_TIMEOUT: Duration = Duration::from_secs(30);
 const OPEN: u8 = 1;
 const OPEN_OK: u8 = 2;
 const OPEN_ERR: u8 = 3;
 const DATA: u8 = 4;
 const CLOSE: u8 = 5;
+const RESEND: u8 = 6;
+/// How much of the outbound plaintext tail each stream keeps so a client
+/// RESEND request (a lost chunk that the duplicated copies failed to heal)
+/// can be replayed. Matches the client reorder window size.
+const RESEND_BUFFER_BYTES: usize = 128 * 1024;
+/// Upper bound of chunks replayed per single RESEND request, so one request
+/// cannot flood the tunnel after a large loss burst.
+const RESEND_MAX_FRAMES: usize = 128;
 
 #[derive(Debug)]
 pub enum StreamInput {
     Data(Vec<u8>),
+    Resend(u64),
     Close,
 }
 
@@ -151,6 +165,19 @@ fn enqueue_data(
     overflow
 }
 
+/// Range within the resend tail reachable from `offset`, if any.
+fn resend_range(out_tail_len: u64, out_total: u64, offset: u64) -> Option<usize> {
+    let oldest = out_total.saturating_sub(out_tail_len);
+    if offset < oldest || offset >= out_total {
+        return None;
+    }
+    let start = (offset - oldest) as usize;
+    if start > out_tail_len as usize {
+        return None;
+    }
+    Some(start)
+}
+
 pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Result<()> {
     let frame = parse_frame(payload).ok_or_else(|| anyhow::anyhow!("invalid proxy frame"))?;
     let key = (session_id, frame.stream_id);
@@ -206,7 +233,20 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
                 let _ = sender.try_send(StreamInput::Close);
             }
         }
-        _ => bail!("unexpected client proxy frame"),
+        RESEND => {
+            let Ok(offset) = frame.payload[..].try_into() else {
+                return Ok(());
+            };
+            let offset = u64::from_be_bytes(offset);
+            if app
+                .proxy_streams
+                .get(&key)
+                .is_some_and(|sender| sender.try_send(StreamInput::Resend(offset)).is_err())
+            {
+                app.proxy_streams.remove(&key);
+            }
+        }
+        _ => return Ok(()),
     }
     Ok(())
 }
@@ -226,17 +266,73 @@ async fn run_stream(
         send_frame(&app, session_id, encode_frame(OPEN_OK, stream_id, &[]))?;
         let mut buffer = vec![0u8; MAX_DATA];
         let mut sent = StreamSequence::default();
-        let mut received = StreamSequence::default();
+        let mut received = crate::proxy_sequence::ReorderReceiver::default();
+        let mut out_tail = Vec::<u8>::new();
+        let mut hole_deadline = None;
+        let mut last_activity = tokio::time::Instant::now();
         loop {
+            if received.is_waiting() {
+                if hole_deadline.is_none() {
+                    hole_deadline = Some(tokio::time::Instant::now() + DATA_HOLE_PATIENCE);
+                }
+            } else {
+                hole_deadline = None;
+            }
+            let quiet_due = last_activity + DATA_QUIET_TIMEOUT;
+            let due = match hole_deadline {
+                Some(hole_due) => quiet_due.min(hole_due),
+                None => quiet_due,
+            };
+            let stall = async move { tokio::time::sleep_until(due).await };
+            tokio::pin!(stall);
             tokio::select! {
                 read = stream.read(&mut buffer) => match read? {
                     0 => break,
-                    length => send_frame(&app, session_id, encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?))?,
+                    length => {
+                        last_activity = tokio::time::Instant::now();
+                        let plaintext = &buffer[..length];
+                        out_tail.extend_from_slice(plaintext);
+                        let overflow = out_tail.len().saturating_sub(RESEND_BUFFER_BYTES);
+                        if overflow > 0 {
+                            out_tail.drain(..overflow.min(out_tail.len()));
+                        }
+                        send_frame(&app, session_id, encode_frame(DATA, stream_id, &sent.encode(plaintext)?))?
+                    }
                 },
                 command = input.recv() => match command {
-                    Some(StreamInput::Data(data)) => stream.write_all(received.decode(&data)?).await?,
+                    Some(StreamInput::Data(data)) => {
+                        last_activity = tokio::time::Instant::now();
+                        if let Some(decoded) = received.push(&data)? {
+                            stream.write_all(&decoded).await?;
+                        }
+                    }
+                    Some(StreamInput::Resend(offset)) => {
+                        let out_total = sent.offset();
+                        let out_tail_len = out_tail.len() as u64;
+                        let Some(start) = resend_range(out_tail_len, out_total, offset) else {
+                            continue;
+                        };
+                        let mut cursor = offset;
+                        let mut slice = &out_tail[start..];
+                        let mut frames = 0usize;
+                        while !slice.is_empty() && frames < RESEND_MAX_FRAMES {
+                            let take = slice.len().min(MAX_DATA);
+                            let chunk = &slice[..take];
+                            send_frame(
+                                &app,
+                                session_id,
+                                encode_frame(DATA, stream_id, &StreamSequence::encode_at(cursor, chunk)?),
+                            )?;
+                            cursor += take as u64;
+                            slice = &slice[take..];
+                            frames += 1;
+                        }
+                    }
                     Some(StreamInput::Close) | None => break,
                 },
+                _ = &mut stall => {
+                    bail!("proxy stream stalled: no transport activity");
+                }
             }
         }
         Result::<()>::Ok(())
@@ -298,5 +394,23 @@ mod tests {
         assert!(!allowed_destination("169.254.169.254".parse().unwrap()));
         assert!(!allowed_destination("::ffff:127.0.0.1".parse().unwrap()));
         assert!(allowed_destination("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn resend_range_covers_only_the_reachable_suffix() {
+        let tail_len = 1024u64;
+        let total = 100_000u64;
+        // Tail holds [98976, 100000): offset inside it is reachable.
+        assert_eq!(resend_range(tail_len, total, 99_000), Some(24));
+        // The exact oldest byte of the tail.
+        assert_eq!(resend_range(tail_len, total, 98_976), Some(0));
+        // The exact end is not reachable (nothing new to send).
+        assert_eq!(resend_range(tail_len, total, 100_000), None);
+        // Too old: beyond the tail.
+        assert_eq!(resend_range(tail_len, total, 98_975), None);
+        // Requesting future data is ignored.
+        assert_eq!(resend_range(tail_len, total, 100_001), None);
+        // Degenerate: empty tail keeps nothing replayable.
+        assert_eq!(resend_range(0, 0, 0), None);
     }
 }

@@ -25,11 +25,28 @@ const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
 const MAX_STREAMS: usize = 64;
+/// How long a CSQPX2 reorder hole may stay open before the stream is reset.
+/// Long enough to absorb a burst reordering through the duplicated copies, short
+/// enough to fail fast (and let the browser retry) when the leg is truly dead.
+const DATA_HOLE_PATIENCE: Duration = Duration::from_secs(6);
+/// Absolute quiet timeout: if the tunnel delivers no DATA frames for a stream
+/// for this long, the leg has silently stopped and the stream is reset instead
+/// of hanging until the browser gives up. Long enough that a genuinely idle
+/// stream (WebSocket without traffic, SSE/long-poll, keep-alive) is left
+/// alone, yet well under the browser's own ~2min idle timeout so the retry
+/// still lands on a fresh carrier; longer than the hole patience because a
+/// missing close/tear leaves no detectable hole at all.
+const DATA_QUIET_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const OPEN: u8 = 1;
 const OPEN_OK: u8 = 2;
 const OPEN_ERR: u8 = 3;
 const DATA: u8 = 4;
 pub(crate) const CLOSE: u8 = 5;
+const RESEND: u8 = 6;
+/// How often the client asks the server to replay a missing suffix while a
+/// reorder hole stays open. Sparser than the hole patience so at least one
+/// retransmission attempt lands before the stream is reset.
+const RESEND_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 enum Inbound {
@@ -97,6 +114,15 @@ pub async fn start(
     let (frame_tx, mut frame_rx) = mpsc::channel::<Vec<u8>>(512);
     dispatcher.set_proxy_frame_sender(frame_tx)?;
     let inbound_streams = streams.clone();
+    let (abort_tx, mut abort_rx) = mpsc::channel::<u64>(256);
+    dispatcher.set_proxy_abort(abort_tx)?;
+    let abort_streams = inbound_streams.clone();
+    tokio::spawn(async move {
+        while let Some(stream_id) = abort_rx.recv().await {
+            let mut streams = abort_streams.lock().await;
+            deliver_inbound(&mut streams, stream_id, Inbound::Closed);
+        }
+    });
     let inbound_cancel = cancel.clone();
     tokio::spawn(async move {
         loop {
@@ -163,6 +189,7 @@ async fn handle_client(
     let ibound0 = stats_arg.inbound_datagrams.load(Ordering::Relaxed);
     let obound0 = stats_arg.outbound_datagrams.load(Ordering::Relaxed);
     let (mut down_frames, mut down_bytes) = (0u64, 0u64);
+    let mut resends = 0u64;
     let result = async {
         let open_frame = encode_frame(OPEN, stream_id, &target);
         let spread_base = (stream_id & 0xffff) as usize;
@@ -199,11 +226,48 @@ async fn handle_client(
         let (mut reader, mut writer) = socket.into_split();
         let mut buffer = vec![0u8; MAX_DATA];
         let mut sent = StreamSequence::default();
-        let mut received = StreamSequence::default();
+        let mut received = crate::proxy_sequence::ReorderReceiver::default();
+        let mut hole_deadline = None;
+        let mut last_down_activity = tokio::time::Instant::now();
+        let mut last_resend = None;
         loop {
+            if received.is_waiting() {
+                if hole_deadline.is_none() {
+                    hole_deadline = Some(tokio::time::Instant::now() + DATA_HOLE_PATIENCE);
+                }
+                // Ask the server to replay the missing suffix. Refresh the hole
+                // deadline on each successfully queued request so a healthy but
+                // lossy carrier gets enough retransmission attempts, while a
+                // truly dead leg still fails fast once requests stop helping.
+                let now = tokio::time::Instant::now();
+                if last_resend
+                    .is_none_or(|last| now.duration_since(last) >= RESEND_INTERVAL)
+                    && let Some(offset) = received.missing_offset()
+                {
+                    let mut payload = Vec::with_capacity(8);
+                    payload.extend_from_slice(&offset.to_be_bytes());
+                    let queued = dispatcher
+                        .send_proxy_frame(&pool, &encode_frame(RESEND, stream_id, &payload))
+                        .await;
+                    if queued.is_ok() {
+                        resends += 1;
+                        last_resend = Some(now);
+                        hole_deadline = Some(now + DATA_HOLE_PATIENCE);
+                    }
+                }
+            } else {
+                hole_deadline = None;
+            }
+            let quiet_due = last_down_activity + DATA_QUIET_TIMEOUT;
+            let due = match hole_deadline {
+                Some(hole_due) => quiet_due.min(hole_due),
+                None => quiet_due,
+            };
+            let stall = async move { tokio::time::sleep_until(due).await };
+            tokio::pin!(stall);
             tokio::select! {
                 _ = cancel.cancelled() => break,
-read = reader.read(&mut buffer) => match read? {
+                                read = reader.read(&mut buffer) => match read? {
                     0 => break,
                     length => {
                         dispatcher.stats().total_bytes_up.fetch_add(length as i64, Ordering::Relaxed);
@@ -217,21 +281,30 @@ read = reader.read(&mut buffer) => match read? {
                 },
                 inbound = rx.recv() => match inbound {
                     Some(Inbound::Data(data)) => {
-                        let decoded = received.decode(&data)?;
-                        down_frames += 1;
-                        down_bytes += decoded.len() as u64;
-                        dispatcher.stats().total_bytes_down.fetch_add(decoded.len() as i64, Ordering::Relaxed);
-                        writer.write_all(decoded).await?;
+                        last_down_activity = tokio::time::Instant::now();
+                        if let Some(decoded) = received.push(&data)? {
+                            down_frames += 1;
+                            down_bytes += decoded.len() as u64;
+                            dispatcher.stats().total_bytes_down.fetch_add(decoded.len() as i64, Ordering::Relaxed);
+                            writer.write_all(&decoded).await?;
+                        }
                     }
                     Some(Inbound::Closed | Inbound::Error(_)) | None => break,
                     Some(Inbound::Opened) => {}
                 },
+                _ = &mut stall => {
+                    // Either a reorder hole stayed open without progress or the
+                    // tunnel went completely quiet for this stream. The leg is
+                    // effectively dead: fail fast so the browser can retry on
+                    // a healthy carrier instead of hanging on ERR/HTTP timeout.
+                    bail!("proxy stream stalled: no downlink progress");
+                }
             }
         }
         Result::<()>::Ok(())
     }.await;
     eprintln!(
-        "[SXP] stream {stream_id} ended: down_frames={down_frames} down_bytes={down_bytes} ok={:?} dt={}ms ibound_delta={} obound_delta={}",
+        "[SXP] stream {stream_id} ended: down_frames={down_frames} down_bytes={down_bytes} resends={resends} ok={:?} dt={}ms ibound_delta={} obound_delta={}",
         result.is_ok(),
         started.elapsed().as_millis(),
         stats_arg
@@ -320,6 +393,24 @@ mod tests {
         assert_eq!(frame.stream_id, 42);
         assert_eq!(frame.payload, b"payload");
         assert!(!is_frame(b"ordinary IP packet"));
+    }
+
+    #[test]
+    fn resend_frame_round_trip_and_routing() {
+        let mut payload = Vec::with_capacity(8);
+        payload.extend_from_slice(&123_456u64.to_be_bytes());
+        let encoded = encode_frame(RESEND, 7, &payload);
+        let frame = parse_frame(&encoded).unwrap();
+        assert_eq!(frame.kind, RESEND);
+        assert_eq!(frame.stream_id, 7);
+        assert_eq!(
+            u64::from_be_bytes(frame.payload.try_into().unwrap()),
+            123_456
+        );
+        // RESEND is routed through the pinned carrier like DATA, not like OPEN.
+        let (kind, stream_id) = frame_route(&encoded).unwrap();
+        assert_eq!(kind, RESEND);
+        assert_eq!(stream_id, 7);
     }
 
     #[tokio::test]
