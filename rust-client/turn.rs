@@ -418,7 +418,11 @@ impl TurnAllocation {
         Ok(())
     }
 
-    pub async fn send_with_duplicate(&self, mut packet: PacketBuf, extra_copies: usize) -> Result<()> {
+    pub async fn send_with_duplicate(
+        &self,
+        mut packet: PacketBuf,
+        extra_copies: usize,
+    ) -> Result<()> {
         self.ensure_open()?;
         let channel = self.shared.channel.load(Ordering::Acquire);
         if channel == 0 {

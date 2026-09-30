@@ -256,6 +256,12 @@ return L.view.extend({
         socks5_listen.default = '127.0.0.1:1080';
         socks5_listen.depends('mode', 'socks5');
 
+        var socks5_max_streams = s.option(form.Value, 'socks5_max_streams', 'Максимум одновременных SOCKS5-потоков');
+        socks5_max_streams.datatype = 'uinteger';
+        socks5_max_streams.default = '256';
+        socks5_max_streams.placeholder = '0 — без ограничения';
+        socks5_max_streams.depends('mode', 'socks5');
+
         var tun_device = s.option(form.Value, 'tun_device', 'TUN-интерфейс');
         tun_device.default = 'csqtt0';
         tun_device.depends('mode', 'tun');
@@ -285,7 +291,7 @@ return L.view.extend({
                 logWrap,
                 E('div', { class: 'csqtt-footer' }, [
                     E('span', { class: 'csqtt-footerver' },
-                        'Версия панели: 2.1.13-r3 · ver 25.12')
+                        'Версия панели: 2.1.14-r5 · ver 25.12')
                 ])
             ]);
         });

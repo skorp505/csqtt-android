@@ -534,9 +534,7 @@ impl TransportWriter {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        self.shared
-            .last_tx_ms
-            .store(now_ms, Ordering::Relaxed);
+        self.shared.last_tx_ms.store(now_ms, Ordering::Relaxed);
     }
 
     async fn send_packet(&mut self, mut packet: PacketBuf) -> Result<()> {
@@ -1197,8 +1195,7 @@ fn self_stall_likely(transport: &TransportReader) -> bool {
         .unwrap_or_default()
         .as_millis() as u64;
     let last_tx = transport.shared.last_tx_ms.load(Ordering::Relaxed);
-    last_tx != 0
-        && now_ms.saturating_sub(last_tx) <= PROXY_STALL_TIMEOUT.as_millis() as u64
+    last_tx != 0 && now_ms.saturating_sub(last_tx) <= PROXY_STALL_TIMEOUT.as_millis() as u64
 }
 
 async fn deliver_inbound_packet(dispatcher: &Dispatcher, packet: PacketBuf) {

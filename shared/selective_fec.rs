@@ -79,6 +79,7 @@ pub fn is_proxy_frame(packet: &[u8]) -> bool {
 /// repeated OPEN as idempotent, duplicate CLOSE as a no-op, and duplicate
 /// DATA as already-consumed bytes.
 #[inline(always)]
+#[allow(dead_code)] // server binary uses only the downlink direction
 pub fn is_client_duplicable_frame(packet: &[u8]) -> bool {
     packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(1 | 4 | 5))
 }
@@ -88,8 +89,9 @@ pub fn is_client_duplicable_frame(packet: &[u8]) -> bool {
 /// stray retransmission can never truncate a live stream. OPEN_ERR is also
 /// idempotent: once the stream is gone a second copy is simply dropped.
 #[inline(always)]
+#[allow(dead_code)] // client binary uses only the uplink direction
 pub fn is_server_duplicable_frame(packet: &[u8]) -> bool {
-    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(2 | 3 | 4))
+    packet.starts_with(b"CSQPX2") && matches!(packet.get(6), Some(2..=4))
 }
 
 #[derive(Clone, Copy)]

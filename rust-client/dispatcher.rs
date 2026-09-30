@@ -628,9 +628,9 @@ impl Dispatcher {
             anyhow::bail!("send_proxy_open requires an OPEN frame");
         }
         let workers = self.workers.load();
-        let worker = workers.get(worker_hint % workers.len().max(1)).ok_or_else(|| {
-            anyhow::anyhow!("CSQTT transport is not ready")
-        })?;
+        let worker = workers
+            .get(worker_hint % workers.len().max(1))
+            .ok_or_else(|| anyhow::anyhow!("CSQTT transport is not ready"))?;
         let route = (worker.id, worker.incarnation_id);
         self.proxy_routes
             .lock()
@@ -645,7 +645,12 @@ impl Dispatcher {
         };
         packet.set_read_len(frame.len())?;
         packet.as_mut_slice().copy_from_slice(frame);
-        if worker.priority.send_awaiting(packet, &self.cancel).await.is_err() {
+        if worker
+            .priority
+            .send_awaiting(packet, &self.cancel)
+            .await
+            .is_err()
+        {
             self.proxy_routes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1497,11 +1502,15 @@ mod tests {
         let (dispatcher, _return_latency_rx, _return_priority_rx, return_rx) = test_dispatcher();
         let pool = PacketPool::new(4);
         dispatcher.return_packet(tcp_packet(&pool, 50_000, 0)).await;
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 2_320)).await;
+        dispatcher
+            .return_packet(tcp_packet(&pool, 50_000, 2_320))
+            .await;
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 0);
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 2_320);
         tokio::time::advance(Duration::from_millis(81)).await;
-        dispatcher.return_packet(tcp_packet(&pool, 50_000, 1_160)).await;
+        dispatcher
+            .return_packet(tcp_packet(&pool, 50_000, 1_160))
+            .await;
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 1_160);
         assert_eq!(pool.available(), pool.capacity());
     }
@@ -1510,7 +1519,9 @@ mod tests {
     async fn direct_downlink_splits_latency_and_bulk_returns() {
         let (dispatcher, return_latency_rx, _return_priority_rx, return_rx) = test_dispatcher();
         let pool = PacketPool::new(4);
-        dispatcher.return_packet(tcp_packet_len(&pool, 50_000, 7, 96)).await;
+        dispatcher
+            .return_packet(tcp_packet_len(&pool, 50_000, 7, 96))
+            .await;
         dispatcher.return_packet(tcp_packet(&pool, 50_000, 8)).await;
         assert_eq!(packet_sequence(&return_latency_rx.try_recv().unwrap()), 7);
         assert_eq!(packet_sequence(&return_rx.try_recv().unwrap()), 8);

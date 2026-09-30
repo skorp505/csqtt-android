@@ -49,7 +49,7 @@ SDK 25.12 сформирует `.apk`, SDK 24.10 — `.ipk`, с корректн
 Ручная `.ipk`-упаковка панели под 24.10 выполняется так:
 
 ```bash
-openwrt/package-panel.sh 2.1.13 target/openwrt-packages/
+openwrt/package-panel.sh 2.1.14 target/openwrt-packages/
 ```
 
 После установки пакета перезагрузите LuCI (или выполните
@@ -82,7 +82,7 @@ uname -m
 ```sh
 apk add kmod-tun ip-full iptables-nft
 mkdir -p /tmp/csqtt-install
-tar -xzf /tmp/csqtt-openwrt_2.1.13_aarch64_generic.tar.gz \
+tar -xzf /tmp/csqtt-openwrt_2.1.14_aarch64_generic.tar.gz \
   -C /tmp/csqtt-install
 sh /tmp/csqtt-install/install.sh
 ```
@@ -92,7 +92,7 @@ sh /tmp/csqtt-install/install.sh
 ```sh
 opkg update
 opkg install kmod-tun ip-full iptables-nft
-opkg install /tmp/csqtt-client_2.1.13_aarch64_generic.ipk
+opkg install /tmp/csqtt-client_2.1.14_aarch64_generic.ipk
 ```
 
 ## Настройка
@@ -123,6 +123,41 @@ logread -e csqtt
 - `mode='socks5'` поднимает прокси на `socks5_listen` без изменения маршрутов.
   По умолчанию он слушает только `127.0.0.1:1080`; менять адрес на LAN следует
   только вместе с отдельными firewall-ограничениями.
+
+### SOCKS5 для podkop и других локальных потребителей
+
+В режиме `socks5` локальный порт считается долгоживущим контрактом с тем, что
+через него ходит. При обрыве VK/TURN-сессии клиент не закрывает порт: он сам
+пересобирает сессию с backoff 3→6→12→24…→60 с и сбрасывает состояние handshake
+на каждую попытку. Поэтому `podkop` не теряет прокси из-за кратковременной
+недоступности VK, а лишь ждёт.
+
+```sh
+uci set csqtt.main.mode='socks5'
+uci set csqtt.main.socks5_listen='127.0.0.1:1080'
+uci set csqtt.main.socks5_max_streams='256'   # 0 — без ограничения
+uci commit csqtt
+/etc/init.d/csqtt restart
+```
+
+Проверка без туннеля: `greeting` отвечает `05 00`, а `CONNECT` — кодом `01`
+(«канал ещё не готов»), а не обрывом соединения. Пустой `05 01` вместо обрыва
+означает, что клиент жив, а VK/TURN ещё не поднялись.
+
+Настройка podkop на этот прокси:
+
+```sh
+uci set podkop.@proxy[0].proxy_type='socks5'
+uci set podkop.@proxy[0].proxy_addr='127.0.0.1'
+uci set podkop.@proxy[0].proxy_port='1080'
+uci commit podkop
+/etc/init.d/podkop restart
+```
+
+Доступ к LAN-адресам (например, к самому роутеру `192.168.11.1`) через туннель
+требует на стороне VPS-сервера флага `--allow-private-destinations`; без него
+сервер закрывает такие `CONNECT` с кодом `05`. Loopback, unspecified, multicast
+и broadcast сервер не открывает даже с этим флагом.
 
 `csqtt-tun` применяет адрес из `TUNCONF`, добавляет policy route, forwarding и
 MASQUERADE, а при остановке удаляет только созданные им правила. DNS из

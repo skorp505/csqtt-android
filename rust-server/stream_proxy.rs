@@ -18,8 +18,8 @@ pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
-const MAX_GLOBAL_STREAMS: usize = 256;
-const MAX_SESSION_STREAMS: usize = 32;
+const MAX_GLOBAL_STREAMS: usize = 1024;
+const MAX_SESSION_STREAMS: usize = 256;
 /// How long a CSQPX2 reorder hole may stay open before the stream is reset.
 const DATA_HOLE_PATIENCE: Duration = Duration::from_secs(6);
 /// Absolute quiet timeout for the whole stream (both directions idle). Bounds
@@ -109,36 +109,45 @@ fn parse_target(payload: &[u8]) -> Result<(String, u16)> {
     Ok((host, port))
 }
 
-fn allowed_destination(address: IpAddr) -> bool {
+/// Whether a resolved target may be dialled.
+///
+/// Loopback, unspecified, multicast and broadcast stay blocked unconditionally:
+/// a CONNECT to those would turn the exit node into a proxy onto the VPS itself.
+/// Private and link-local ranges are the operator's call, because a router-side
+/// SOCKS5 client (podkop and friends) legitimately needs to reach LAN hosts
+/// through the tunnel, while a shared exit node must not.
+fn allowed_destination(address: IpAddr, allow_private: bool) -> bool {
     match address {
         IpAddr::V4(ip) => {
             !ip.is_unspecified()
                 && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_private()
                 && !ip.is_multicast()
                 && ip.octets() != [255, 255, 255, 255]
+                && (allow_private || (!ip.is_link_local() && !ip.is_private()))
         }
         IpAddr::V6(ip) => {
             if let Some(mapped) = ip.to_ipv4_mapped() {
-                return allowed_destination(IpAddr::V4(mapped));
+                return allowed_destination(IpAddr::V4(mapped), allow_private);
             }
+            let link_local = ip.segments()[0] & 0xffc0 == 0xfe80;
+            let unique_local = ip.segments()[0] & 0xfe00 == 0xfc00;
             !ip.is_unspecified()
                 && !ip.is_loopback()
                 && !ip.is_multicast()
-                && !(ip.segments()[0] & 0xffc0 == 0xfe80)
-                && !(ip.segments()[0] & 0xfe00 == 0xfc00)
+                && (allow_private || !(link_local || unique_local))
         }
     }
 }
 
-async fn resolve_target(host: &str, port: u16) -> Result<SocketAddr> {
+async fn resolve_target(host: &str, port: u16, allow_private: bool) -> Result<SocketAddr> {
     let mut addresses = tokio::time::timeout(Duration::from_secs(10), lookup_host((host, port)))
         .await
         .map_err(|_| anyhow::anyhow!("DNS timeout"))??;
     addresses
-        .find(|address| allowed_destination(address.ip()))
-        .ok_or_else(|| anyhow::anyhow!("target is not a public address"))
+        .find(|address| allowed_destination(address.ip(), allow_private))
+        .ok_or_else(|| {
+            anyhow::anyhow!("target is not a permitted address (allow_private={allow_private})")
+        })
 }
 
 fn send_frame(app: &Arc<App>, session_id: u64, frame: Vec<u8>) -> Result<()> {
@@ -194,8 +203,7 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
                 // kill a healthy stream, so the duplicate is ignored.
                 return Ok(());
             }
-            if app.proxy_streams.len() >= MAX_GLOBAL_STREAMS
-                || session_count >= MAX_SESSION_STREAMS
+            if app.proxy_streams.len() >= MAX_GLOBAL_STREAMS || session_count >= MAX_SESSION_STREAMS
             {
                 send_frame(
                     app,
@@ -259,7 +267,7 @@ async fn run_stream(
     mut input: mpsc::Receiver<StreamInput>,
 ) {
     let result = async {
-        let address = resolve_target(&target.0, target.1).await?;
+        let address = resolve_target(&target.0, target.1, app.allow_private_destinations).await?;
         let mut stream = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(address))
             .await.map_err(|_| anyhow::anyhow!("connect timeout"))??;
         stream.set_nodelay(true)?;
@@ -389,11 +397,17 @@ mod tests {
 
     #[test]
     fn private_and_metadata_destinations_are_blocked() {
-        assert!(!allowed_destination("127.0.0.1".parse().unwrap()));
-        assert!(!allowed_destination("10.0.0.1".parse().unwrap()));
-        assert!(!allowed_destination("169.254.169.254".parse().unwrap()));
-        assert!(!allowed_destination("::ffff:127.0.0.1".parse().unwrap()));
-        assert!(allowed_destination("1.1.1.1".parse().unwrap()));
+        assert!(!allowed_destination("127.0.0.1".parse().unwrap(), false));
+        assert!(!allowed_destination("10.0.0.1".parse().unwrap(), false));
+        assert!(!allowed_destination(
+            "169.254.169.254".parse().unwrap(),
+            false
+        ));
+        assert!(!allowed_destination(
+            "::ffff:127.0.0.1".parse().unwrap(),
+            false
+        ));
+        assert!(allowed_destination("1.1.1.1".parse().unwrap(), false));
     }
 
     #[test]
@@ -412,5 +426,68 @@ mod tests {
         assert_eq!(resend_range(tail_len, total, 100_001), None);
         // Degenerate: empty tail keeps nothing replayable.
         assert_eq!(resend_range(0, 0, 0), None);
+    }
+
+    #[test]
+    fn private_targets_stay_blocked_by_default() {
+        for blocked in [
+            "192.168.11.1",
+            "10.0.0.5",
+            "172.16.4.4",
+            "169.254.10.1",
+            "127.0.0.1",
+            "::1",
+            "224.0.0.1",
+            "255.255.255.255",
+            "0.0.0.0",
+            "fd00::1",
+            "fe80::1",
+        ] {
+            let address: IpAddr = blocked.parse().unwrap();
+            assert!(
+                !allowed_destination(address, false),
+                "{blocked} must not be reachable without the private-destination opt-in"
+            );
+        }
+    }
+
+    #[test]
+    fn private_opt_in_unlocks_lan_but_never_the_server_itself() {
+        for allowed in [
+            "192.168.11.1",
+            "10.0.0.5",
+            "172.16.4.4",
+            "169.254.10.1",
+            "fd00::1",
+        ] {
+            let address: IpAddr = allowed.parse().unwrap();
+            assert!(
+                allowed_destination(address, true),
+                "{allowed} must be reachable for a router-side SOCKS5 client"
+            );
+        }
+        for still_blocked in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::ffff:127.0.0.1",
+        ] {
+            let address: IpAddr = still_blocked.parse().unwrap();
+            assert!(
+                !allowed_destination(address, true),
+                "{still_blocked} must stay blocked even with the opt-in"
+            );
+        }
+    }
+
+    #[test]
+    fn public_targets_are_unaffected_by_the_opt_in() {
+        for public in ["1.1.1.1", "8.8.8.8", "2606:4700::1111"] {
+            let address: IpAddr = public.parse().unwrap();
+            assert!(allowed_destination(address, false));
+            assert!(allowed_destination(address, true));
+        }
     }
 }

@@ -59,7 +59,10 @@ use std::{
     },
     time::Duration,
 };
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    sync::mpsc,
+};
 use tokio_util::sync::CancellationToken;
 use turn_endpoint::TurnTransportMode;
 use worker::{
@@ -121,9 +124,23 @@ struct Arguments {
     tun_config_hook: String,
     #[arg(long, default_value = "")]
     socks5: String,
-    #[arg(long, default_value_t = false, help = "Duplicate SOCKS5 DATA frames to survive UDP loss")]
+    #[arg(
+        long,
+        default_value_t = stream_proxy::DEFAULT_MAX_STREAMS,
+        help = "Максимум одновременных SOCKS5-соединений (0 = без лимита)"
+    )]
+    socks5_max_streams: usize,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Duplicate SOCKS5 DATA frames to survive UDP loss"
+    )]
     dup_proxy: bool,
-    #[arg(long, default_value_t = 2, help = "Total copies for proxied frames (2 = 1 data + 1 duplicate)")]
+    #[arg(
+        long,
+        default_value_t = 2,
+        help = "Total copies for proxied frames (2 = 1 data + 1 duplicate)"
+    )]
     dup_proxy_copies: u8,
     #[arg(long, default_value_t = false)]
     validate_vk_hashes: bool,
@@ -273,6 +290,7 @@ async fn run(arguments: Arguments) -> Result<()> {
         finish_js_calls.clone(),
     );
     let parent_task = start_parent_monitor(cancel.clone());
+    let signal_task = start_signal_monitor(cancel.clone());
     events.process(std::process::id());
     let pool = PacketPool::new(packet_pool_size(workers));
     let tun_modes =
@@ -310,16 +328,19 @@ async fn run(arguments: Arguments) -> Result<()> {
             return Err(error);
         }
     };
+    let mut socks5_address = String::new();
     let proxy_task = if arguments.socks5.is_empty() {
         None
     } else {
         let (address, task) = stream_proxy::start(
             &arguments.socks5,
+            arguments.socks5_max_streams,
             dispatcher.clone(),
             pool.clone(),
             cancel.clone(),
         )
         .await?;
+        socks5_address = address.to_string();
         crate::log_error!("[SOCKS5] Локальный прокси: {address} · CONNECT через CSQTT");
         Some(task)
     };
@@ -350,7 +371,6 @@ async fn run(arguments: Arguments) -> Result<()> {
         &local_port,
         params.turn_transport,
     );
-    let repair = RepairState::new(workers);
     let stats_task = tokio::spawn(stats.clone().run(events.clone(), cancel.clone()));
     let (config_tx, mut config_rx) = tokio::sync::mpsc::channel::<String>(32);
     let config_events = events.clone();
@@ -388,24 +408,25 @@ async fn run(arguments: Arguments) -> Result<()> {
         } else {
             (None, None)
         };
-    let context = Arc::new(GroupContext {
-        params,
-        auth,
+    // A local SOCKS5 listener is a long-lived contract with whatever routes
+    // through it (podkop, a browser, sing-box). When the carrier drops we must
+    // keep the listening socket bound and rebuild the session underneath it,
+    // otherwise the port disappears, callers see ECONNREFUSED and the whole
+    // routing chain goes down instead of just stalling until the retry lands.
+    let keep_listener_alive = proxy_task.is_some() && !js_hash_mode;
+    let address: Arc<str> = Arc::from(socks5_address.as_str());
+    let session_template = SessionTemplate {
+        params: params.clone(),
+        auth: auth.clone(),
         dispatcher: dispatcher.clone(),
-        pool,
-        stats,
+        pool: pool.clone(),
+        stats: stats.clone(),
         events: events.clone(),
-        paused,
-        config_tx,
-        start_pacer: Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
-        credential_pacer: Arc::new(tokio::sync::Mutex::new(())),
-        ready_credential_tx,
-        config_sent: Arc::new(AtomicBool::new(false)),
-        config_in_flight: Arc::new(AtomicBool::new(false)),
-        repair,
-        shutdown: Arc::new(ShutdownCoordinator::new()),
+        paused: paused.clone(),
+        config_tx: config_tx.clone(),
+        ready_credential_tx: ready_credential_tx.clone(),
         cancel: cancel.clone(),
-    });
+    };
     let required_ready_bots = required_js_ready_bots(groups);
     if js_auth_mode {
         crate::log_error!("[VK JS] Создатель удерживает звонок");
@@ -419,22 +440,67 @@ async fn run(arguments: Arguments) -> Result<()> {
         ))),
         _ => None,
     };
-    let shutdown_events = events.clone();
-    let groups_future = run_groups(groups, context);
-    tokio::pin!(groups_future);
-    let groups_completed = tokio::select! {
-        _ = &mut groups_future => true,
-        _ = tokio::signal::ctrl_c() => {
-            crate::log_error!("[КЛИЕНТ] Получен сигнал завершения");
-            cancel.cancel();
-            false
-        }
-        _ = cancel.cancelled() => false,
-    };
-    cancel.cancel();
-    if !groups_completed {
-        groups_future.await;
+    // Auto-JS owns the call that mints fresh hashes, so a dropped session
+    // cannot be rebuilt in place: the creator is already gone. Hand the
+    // restart back to the platform supervisor instead of spinning forever.
+    if !js_hash_mode && keep_listener_alive {
+        crate::log_error!(
+            "[КЛИЕНТ] Сессия будет переподключаться автоматически, SOCKS5 {address} не закрывается"
+        );
     }
+    let shutdown_events = events.clone();
+    let mut attempt = 0u32;
+    loop {
+        let context = Arc::new(GroupContext {
+            params: session_template.params.clone(),
+            auth: session_template.auth.clone(),
+            dispatcher: session_template.dispatcher.clone(),
+            pool: session_template.pool.clone(),
+            stats: session_template.stats.clone(),
+            events: session_template.events.clone(),
+            paused: session_template.paused.clone(),
+            config_tx: session_template.config_tx.clone(),
+            start_pacer: Arc::new(WorkerStartPacer::new(WORKER_START_INTERVAL)),
+            credential_pacer: Arc::new(tokio::sync::Mutex::new(())),
+            ready_credential_tx: session_template.ready_credential_tx.clone(),
+            config_sent: Arc::new(AtomicBool::new(false)),
+            config_in_flight: Arc::new(AtomicBool::new(false)),
+            repair: RepairState::new(workers),
+            shutdown: Arc::new(ShutdownCoordinator::new()),
+            cancel: session_template.cancel.clone(),
+        });
+        let mut groups_future = Box::pin(run_groups(groups, context));
+        let completed = tokio::select! {
+            _ = &mut groups_future => true,
+            _ = tokio::signal::ctrl_c() => {
+                crate::log_error!("[КЛИЕНТ] Получен сигнал завершения");
+                cancel.cancel();
+                false
+            }
+            _ = cancel.cancelled() => false,
+        };
+        if !completed {
+            // Shutdown: let the in-flight groups unwind so their sockets and
+            // repair slots are released before the runtime is torn down.
+            let _ = groups_future.await;
+            break;
+        }
+        if !keep_listener_alive {
+            break;
+        }
+        let delay = session_restart_backoff(attempt);
+        attempt = attempt.saturating_add(1);
+        crate::log_error!(
+            "[КЛИЕНТ] Сессия прервана, SOCKS5 {address} остаётся доступным. \
+             Переподключение через {} с (попытка {attempt})",
+            delay.as_secs()
+        );
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = tokio::time::sleep(delay) => {}
+        }
+    }
+    cancel.cancel();
     dispatcher.shutdown().await;
     if let Some(task) = proxy_task {
         let _ = task.await;
@@ -446,6 +512,7 @@ async fn run(arguments: Arguments) -> Result<()> {
     let _ = stats_task.await;
     let _ = config_task.await;
     let _ = control_task.await;
+    let _ = signal_task.await;
     let _ = parent_task.await;
     if let Some(mut task) = creator_leave_task
         && tokio::time::timeout(Duration::from_secs(9), &mut task)
@@ -504,6 +571,32 @@ async fn wait_for_js_credential_readiness(
 
 fn required_js_ready_bots(groups: usize) -> usize {
     groups.div_ceil(GROUPS_PER_CREDENTIAL).clamp(1, 2)
+}
+
+/// Per-attempt rebuild delay for the carrier session. Starts fast enough that
+/// a blip is invisible to callers, then backs off so a long outage does not
+/// hammer the VK endpoint and the TURN relay.
+fn session_restart_backoff(attempt: u32) -> Duration {
+    const BASE: Duration = Duration::from_secs(3);
+    const CAP: Duration = Duration::from_secs(60);
+    let shift = attempt.min(5);
+    BASE.saturating_mul(1u32 << shift).min(CAP)
+}
+
+/// Everything a [`GroupContext`] borrows across session rebuilds. The session
+/// state itself (config flight, repair slots, shutdown coordinator) is rebuilt
+/// per attempt, because those latch after the first successful handshake.
+struct SessionTemplate {
+    params: Arc<RuntimeParams>,
+    auth: Arc<VkAuth>,
+    dispatcher: Arc<Dispatcher>,
+    pool: Arc<PacketPool>,
+    stats: Arc<Stats>,
+    events: Events,
+    paused: Arc<PauseGate>,
+    config_tx: mpsc::Sender<String>,
+    ready_credential_tx: Option<mpsc::UnboundedSender<usize>>,
+    cancel: CancellationToken,
 }
 
 fn normalize_worker_count(requested: usize) -> usize {
@@ -770,6 +863,41 @@ fn start_control_input(
     })
 }
 
+/// systemd and procd both stop the service with SIGTERM, not SIGINT. Without
+/// this the process dies on the signal and the graceful unwind (releasing
+/// sockets, repair slots, the TUN hook) never runs.
+fn start_signal_monitor(cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut terminate = match signal(SignalKind::terminate()) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    crate::log_error!("[КЛИЕНТ] SIGTERM недоступен: {error:#}");
+                    return;
+                }
+            };
+            let mut interrupt = match signal(SignalKind::interrupt()) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    crate::log_error!("[КЛИЕНТ] SIGINT недоступен: {error:#}");
+                    return;
+                }
+            };
+            let received = tokio::select! {
+                _ = cancel.cancelled() => None,
+                _ = terminate.recv() => Some("TERM"),
+                _ = interrupt.recv() => Some("INT"),
+            };
+            if let Some(name) = received {
+                crate::log_error!("[КЛИЕНТ] Получен сигнал {name}, штатное завершение");
+                cancel.cancel();
+            }
+        }
+    })
+}
+
 fn start_parent_monitor(cancel: CancellationToken) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         #[cfg(unix)]
@@ -782,9 +910,7 @@ fn start_parent_monitor(cancel: CancellationToken) -> tokio::task::JoinHandle<()
                 }
                 let current = unsafe { libc::getppid() };
                 if current != parent {
-                    crate::log_error!(
-                        "[КЛИЕНТ] Родитель изменился ({parent} -> {current}), выход"
-                    );
+                    crate::log_error!("[КЛИЕНТ] Родитель изменился ({parent} -> {current}), выход");
                     cancel.cancel();
                     return;
                 }
@@ -829,6 +955,25 @@ fn print_configuration(
     crate::log_error!("[КЛИЕНТ] Device ID: {}", arguments.device_id);
     crate::log_error!("[КЛИЕНТ] Captcha: {captcha}");
     crate::log_error!("[КЛИЕНТ] ═══════════════════════════════════════");
+}
+
+#[cfg(test)]
+mod session_restart_tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_then_saturates_instead_of_overflowing() {
+        assert_eq!(session_restart_backoff(0), Duration::from_secs(3));
+        assert_eq!(session_restart_backoff(1), Duration::from_secs(6));
+        assert_eq!(session_restart_backoff(2), Duration::from_secs(12));
+        assert_eq!(session_restart_backoff(3), Duration::from_secs(24));
+        assert_eq!(session_restart_backoff(4), Duration::from_secs(48));
+        assert_eq!(session_restart_backoff(5), Duration::from_secs(60));
+        // Absurd attempt counters must stay at the cap rather than wrap.
+        for attempt in [6, 31, 32, 1_000, u32::MAX] {
+            assert_eq!(session_restart_backoff(attempt), Duration::from_secs(60));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -24,7 +24,10 @@ pub const MAGIC: &[u8; 6] = b"CSQPX2";
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8;
 const MAX_DATA: usize = 1_280;
 use crate::proxy_sequence::StreamSequence;
-const MAX_STREAMS: usize = 64;
+/// Default concurrent CONNECT cap. Sized for a full-tunnel router use case
+/// (podkop and friends) rather than a single browser; override per deployment
+/// with `--socks5-max-streams`, 0 disables the cap.
+pub const DEFAULT_MAX_STREAMS: usize = 256;
 /// How long a CSQPX2 reorder hole may stay open before the stream is reset.
 /// Long enough to absorb a burst reordering through the duplicated copies, short
 /// enough to fail fast (and let the browser retry) when the leg is truly dead.
@@ -101,6 +104,7 @@ fn deliver_inbound(streams: &mut HashMap<u64, mpsc::Sender<Inbound>>, id: u64, e
 
 pub async fn start(
     bind: &str,
+    max_streams: usize,
     dispatcher: Arc<Dispatcher>,
     pool: Arc<PacketPool>,
     cancel: CancellationToken,
@@ -154,8 +158,17 @@ pub async fn start(
                 _ = cancel.cancelled() => return,
                 accepted = listener.accept() => accepted,
             };
-            let Ok((socket, _)) = accepted else { continue };
-            if streams.lock().await.len() >= MAX_STREAMS {
+            let Ok((mut socket, _)) = accepted else {
+                continue;
+            };
+            if max_streams > 0 && streams.lock().await.len() >= max_streams {
+                // Never drop silently: callers that route whole subnets
+                // through this proxy would otherwise see a bare connection
+                // close and retry forever with no clue why.
+                crate::log_error!(
+                    "[SOCKS5] Достигнут лимит одновременных потоков ({max_streams}), соединение отклонено"
+                );
+                let _ = socket.shutdown().await;
                 drop(socket);
                 continue;
             }
@@ -165,7 +178,12 @@ pub async fn start(
             let streams = streams.clone();
             let cancel = cancel.clone();
             tokio::spawn(async move {
-                let _ = handle_client(socket, id, dispatcher, pool, streams, cancel).await;
+                if let Err(error) =
+                    handle_client(socket, id, dispatcher, pool, streams, cancel).await
+                    && !error.to_string().contains("closed")
+                {
+                    crate::log_error!("[SOCKS5] Поток #{id} закрыт: {error:#}");
+                }
             });
         }
     });
@@ -197,9 +215,17 @@ async fn handle_client(
         let mut attempt = 0u64;
         let open_deadline = tokio::time::Instant::now() + Duration::from_secs(9);
         while tokio::time::Instant::now() < open_deadline {
-            dispatcher
+            if let Err(error) = dispatcher
                 .send_proxy_open(&pool, &open_frame, spread_base.wrapping_add(attempt as usize))
-                .await?;
+                .await
+            {
+                // No ready carrier: the listener must still answer. A bare
+                // close is indistinguishable from a network fault for the
+                // caller, which would then retry a proxy that is up.
+                crate::log_error!("[SOCKS5] Нет готового канала для CONNECT: {error:#}");
+                let _ = write_reply(&mut socket, 1).await;
+                bail!("no carrier available for SOCKS5 CONNECT");
+            }
             match tokio::time::timeout(Duration::from_millis(2000), rx.recv()).await {
                 Ok(Some(Inbound::Opened)) => {
                     opened = Some(Inbound::Opened);
@@ -443,7 +469,7 @@ mod tests {
         .await
         .unwrap();
         let (latency, _latency_rx) = packet_channel(1, true);
-        let (priority, mut priority_rx) = packet_channel(1, true);
+        let (priority, priority_rx) = packet_channel(1, true);
         let (bulk, _bulk_rx) = packet_channel(1, true);
         dispatcher.register(WorkerChannels {
             id: 1,
@@ -534,6 +560,7 @@ mod tests {
         });
         let (address, task) = start(
             "127.0.0.1:0",
+            DEFAULT_MAX_STREAMS,
             dispatcher.clone(),
             pool.clone(),
             cancel.clone(),

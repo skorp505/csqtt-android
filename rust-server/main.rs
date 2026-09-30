@@ -137,6 +137,14 @@ struct Args {
     )]
     fec: protocol::FecProfile,
 
+    #[arg(
+        long,
+        env = "CSQTT_ALLOW_PRIVATE_DESTINATIONS",
+        default_value_t = false,
+        help = "Разрешить CONNECT к приватным и link-local адресам (LAN через туннель)"
+    )]
+    allow_private_destinations: bool,
+
     #[arg(long, help = "Запустить службу CSQTT")]
     start: bool,
 
@@ -207,6 +215,7 @@ pub struct App {
     pub web_pass: String,
     pub secure_cookie: bool,
     pub fec_profile: protocol::FecProfile,
+    pub allow_private_destinations: bool,
     pub sessions: DashMap<u64, Arc<Session>>,
     pub proxy_streams: DashMap<(u64, u64), tokio::sync::mpsc::Sender<stream_proxy::StreamInput>>,
     pub device_epochs: DashMap<String, Arc<protocol::DeviceEpochSlot>>,
@@ -2041,6 +2050,7 @@ async fn async_main() -> Result<()> {
         web_pass,
         secure_cookie: args.secure_cookie,
         fec_profile: args.fec,
+        allow_private_destinations: args.allow_private_destinations,
         sessions: DashMap::new(),
         proxy_streams: DashMap::new(),
         device_epochs: DashMap::new(),

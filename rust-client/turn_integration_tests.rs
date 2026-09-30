@@ -778,10 +778,7 @@ async fn channel_bind_error_closes_data_gate_but_preserves_refresh_zero_control_
     let mut packet = pool.acquire();
     packet.read_area()[..7].copy_from_slice(b"blocked");
     packet.set_read_len(7).unwrap();
-    let send_error = allocation
-        .send_with_duplicate(packet, 0)
-        .await
-        .unwrap_err();
+    let send_error = allocation.send_with_duplicate(packet, 0).await.unwrap_err();
     assert!(format!("{send_error:#}").contains("ChannelBind"));
 
     tokio::time::timeout(Duration::from_secs(2), allocation.deallocate())

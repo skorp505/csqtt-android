@@ -15,3 +15,5 @@ config csqtt 'main'
 	option route_lan '1'
 	option route_table '202'
 	option socks5_listen '127.0.0.1:1080'
+	# 0 disables the cap
+	option socks5_max_streams '256'

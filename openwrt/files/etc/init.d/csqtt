@@ -18,7 +18,7 @@ append_option() {
 
 start_service() {
 	local enabled mode peer password vk_hashes device_id workers obfs
-	local turn_transport turn_host turn_port tun_device socks5_listen
+	local turn_transport turn_host turn_port tun_device socks5_listen socks5_max_streams
 
 	config_load csqtt
 	config_get_bool enabled main enabled 0
@@ -35,6 +35,7 @@ start_service() {
 	config_get turn_port main turn_port
 	config_get tun_device main tun_device csqtt0
 	config_get socks5_listen main socks5_listen 127.0.0.1:1080
+	config_get socks5_max_streams main socks5_max_streams 256
 
 	[ -x "$BIN" ] || { logger -t csqtt "missing $BIN"; return 1; }
 	[ -n "$peer" ] || { logger -t csqtt "uci csqtt.main.peer is required"; return 1; }
@@ -69,8 +70,13 @@ start_service() {
 		append_option tun-config-hook "$TUN_HOOK"
 	else
 		append_option socks5 "$socks5_listen"
+		append_option socks5-max-streams "$socks5_max_streams"
 	fi
-	procd_set_param respawn 3600 5 5
+	# The client keeps its SOCKS5 listener alive across carrier outages and
+	# reschedules the VK/TURN session itself, so a crash must always be
+	# retried. A bounded respawn budget would leave podkop with a dead proxy
+	# after five restarts in an hour and never bring it back.
+	procd_set_param respawn 3600 0 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
 	procd_set_param limits core="0"
