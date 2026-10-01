@@ -1829,7 +1829,9 @@ fn print_cli_help() {
   --web-user ЛОГИН            Логин веб-панели\n  \
   --web-pass ПАРОЛЬ           Пароль веб-панели\n  \
   --dns IP[,IP]               Один или два DNS IPv4-адреса\n  \
-  --secure-cookie             Выдавать cookie только по HTTPS\n"
+  --secure-cookie             Выдавать cookie только по HTTPS\n  \
+  --allow-private-destinations  Разрешить CONNECT к приватным и link-local \
+адресам (LAN через туннель; loopback остаётся закрытым)\n"
     );
 }
 
