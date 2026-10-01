@@ -94,8 +94,11 @@ offset DATA-фрагментов. Потеря/перестановка заве
 быть целью легитимно. Включается явно:
 
 ```sh
-csqtt --allow-private-destinations        # или CSQTT_ALLOW_PRIVATE_DESTINATIONS=1
+csqtt --allow-private-destinations        # или CSQTT_ALLOW_PRIVATE_DESTINATIONS=true
 ```
+
+Переменная принимает ровно `true` или `false`. Значения `1`, `0`, `yes`
+приводят к отказу старта с ошибкой разбора — проверено на 2.1.14.
 
 Опция снимает блокировку только приватных и link-local адресов. Loopback
 (`127.0.0.0/8`, `::1`), unspecified, multicast и broadcast остаются
