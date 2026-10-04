@@ -1947,7 +1947,7 @@ mod tests {
             let mut packet = pool.acquire();
             packet.set_read_len(bytes.len()).unwrap();
             packet.as_mut_slice().copy_from_slice(&bytes);
-            dispatcher.return_packet(packet);
+            dispatcher.return_packet(packet).await;
         }
         assert_eq!(rx.try_recv().unwrap(), frame);
         let packet = tokio::time::timeout(Duration::from_secs(1), latency.recv(&dispatcher.cancel))
