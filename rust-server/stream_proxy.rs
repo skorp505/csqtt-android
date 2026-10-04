@@ -24,7 +24,11 @@ const MAX_SESSION_STREAMS: usize = 256;
 const DATA_HOLE_PATIENCE: Duration = Duration::from_secs(6);
 /// Absolute quiet timeout for the whole stream (both directions idle). Bounds
 /// ghosts left by failed open attempts and targets that silently stopped.
-const DATA_QUIET_TIMEOUT: Duration = Duration::from_secs(30);
+/// Downlink DATA refreshes the clock too, otherwise a plain download larger
+/// than the timeout killed itself mid-transfer. Matches the client's value: a
+/// reset that only one side believes in leaves the other waiting on a leg that
+/// is already gone.
+const DATA_QUIET_TIMEOUT: Duration = Duration::from_secs(60);
 const OPEN: u8 = 1;
 const OPEN_OK: u8 = 2;
 const OPEN_ERR: u8 = 3;
@@ -233,6 +237,16 @@ pub async fn handle_frame(app: &Arc<App>, session_id: u64, payload: &[u8]) -> Re
                 bail!("proxy data frame too large");
             }
             if enqueue_data(&app.proxy_streams, key, frame.payload) {
+                crate::log_event(
+                    app,
+                    "WARN",
+                    "PROXY",
+                    &format!(
+                        "SXP-QOVERFLOW stream={} queue=64 frame={}B -> CLOSE",
+                        frame.stream_id,
+                        frame.payload.len()
+                    ),
+                );
                 send_frame(app, session_id, encode_frame(CLOSE, frame.stream_id, &[]))?;
             }
         }
@@ -266,6 +280,7 @@ async fn run_stream(
     target: (String, u16),
     mut input: mpsc::Receiver<StreamInput>,
 ) {
+    let started = tokio::time::Instant::now();
     let result = async {
         let address = resolve_target(&target.0, target.1, app.allow_private_destinations).await?;
         let mut stream = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(address))
@@ -335,6 +350,7 @@ async fn run_stream(
                             slice = &slice[take..];
                             frames += 1;
                         }
+                        last_activity = tokio::time::Instant::now();
                     }
                     Some(StreamInput::Close) | None => break,
                 },
@@ -347,7 +363,31 @@ async fn run_stream(
     }.await;
     app.proxy_streams.remove(&(session_id, stream_id));
     if result.is_err() {
+        crate::log_event(
+            &app,
+            "WARN",
+            "PROXY",
+            &format!(
+                "SXP-END stream={stream_id} err={} dt={}ms",
+                result
+                    .as_ref()
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_default(),
+                started.elapsed().as_millis()
+            ),
+        );
         let _ = send_frame(&app, session_id, encode_frame(OPEN_ERR, stream_id, &[5]));
+    } else {
+        crate::log_event(
+            &app,
+            "INFO",
+            "PROXY",
+            &format!(
+                "SXP-CLEAN stream={stream_id} dt={}ms",
+                started.elapsed().as_millis()
+            ),
+        );
     }
     let _ = send_frame(&app, session_id, encode_frame(CLOSE, stream_id, &[]));
 }
@@ -368,6 +408,16 @@ pub fn close_session(app: &Arc<App>, session_id: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_timeout_matches_the_client_and_outlives_a_replay() {
+        // rust-client/stream_proxy.rs uses 60s for the same bound. A server that
+        // resets earlier leaves the client waiting on a leg that is already gone,
+        // and one that resets later leaves ghosts on the server.
+        assert_eq!(DATA_QUIET_TIMEOUT, Duration::from_secs(60));
+        // A reorder hole must be caught by the hole timer, not by the quiet one.
+        assert!(DATA_QUIET_TIMEOUT > DATA_HOLE_PATIENCE);
+    }
 
     #[tokio::test]
     async fn full_stream_queue_closes_without_delivering_a_suffix_after_a_gap() {

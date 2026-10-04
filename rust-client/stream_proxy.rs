@@ -152,7 +152,7 @@ pub async fn start(
     });
 
     let task = tokio::spawn(async move {
-        let ids = AtomicU64::new(1);
+        let ids = Arc::new(AtomicU64::new(1));
         loop {
             let accepted = tokio::select! {
                 _ = cancel.cancelled() => return,
@@ -177,9 +177,10 @@ pub async fn start(
             let pool = pool.clone();
             let streams = streams.clone();
             let cancel = cancel.clone();
+            let ids = ids.clone();
             tokio::spawn(async move {
                 if let Err(error) =
-                    handle_client(socket, id, dispatcher, pool, streams, cancel).await
+                    handle_client(socket, ids, dispatcher, pool, streams, cancel).await
                     && !error.to_string().contains("closed")
                 {
                     crate::log_error!("[SOCKS5] Поток #{id} закрыт: {error:#}");
@@ -190,9 +191,93 @@ pub async fn start(
     Ok((address, task))
 }
 
+/// One OPEN attempt gets a single carrier and a short budget. A carrier that
+/// never answers costs `OPEN_ATTEMPT_TIMEOUT`, and the retry moves on instead
+/// of stalling the caller's CONNECT for the whole budget.
+const OPEN_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(1500);
+/// OPEN_OK only proves the server reached the target; the first DATA frame is
+/// what proves this carrier's downlink actually carries payload. A relay that
+/// silently blackholes the stream is only visible here.
+const FIRST_DATA_TIMEOUT: Duration = Duration::from_millis(2500);
+const OPEN_ATTEMPTS: usize = 4;
+/// Wall-clock ceiling for all attempts combined, so a caller never waits longer
+/// than the old single-carrier deadline.
+const OPEN_BUDGET: Duration = Duration::from_secs(9);
+
+/// Whether parked caller bytes may be sent again on a replacement carrier.
+///
+/// Nothing parked means the caller has not spoken yet, which is always safe to
+/// repeat. Otherwise only a request that clearly starts with an idempotent HTTP
+/// method qualifies: a first copy may already have reached the target, and a
+/// silent duplicate POST is worse than a failed connection the caller retries.
+/// Anything unrecognised, TLS included, counts as unsafe to repeat.
+fn replayable(parked: &[u8]) -> bool {
+    const IDEMPOTENT: [&[u8]; 4] = [b"GET ", b"HEAD ", b"OPTIONS ", b"TRACE "];
+    parked.is_empty() || IDEMPOTENT.iter().any(|method| parked.starts_with(method))
+}
+
+/// Upper bound on caller bytes parked while a tunnel generation is still
+/// unproven. A request that fits here can be replayed onto the next carrier;
+/// anything larger means the leg is hopeless rather than slow.
+const UNPROVEN_UPLINK_CAP: usize = 16 * 1024;
+
+/// Negotiate one tunnel generation: OPEN on a single carrier, wait for the
+/// server to confirm the remote TCP connect.
+///
+/// Retries land on a different carrier each time, so a blackholed leg costs
+/// `OPEN_ATTEMPT_TIMEOUT` instead of the whole budget. This only proves the
+/// server reached the target; whether this carrier's downlink carries payload
+/// is decided later by the first DATA frame.
+async fn open_tunnel(
+    target: &[u8],
+    dispatcher: &Dispatcher,
+    pool: &Arc<PacketPool>,
+    streams: &Arc<Mutex<HashMap<u64, mpsc::Sender<Inbound>>>>,
+    ids: &AtomicU64,
+) -> Result<(u64, mpsc::Receiver<Inbound>), u8> {
+    let budget_deadline = tokio::time::Instant::now() + OPEN_BUDGET;
+    let mut attempt = 0usize;
+    let mut last_error = 4u8;
+    loop {
+        if attempt >= OPEN_ATTEMPTS || tokio::time::Instant::now() >= budget_deadline {
+            return Err(last_error);
+        }
+        let id = ids.fetch_add(1, Ordering::Relaxed).max(1);
+        let (tx, mut rx) = mpsc::channel(64);
+        streams.lock().await.insert(id, tx);
+        let frame = encode_frame(OPEN, id, target);
+        // Ids increase monotonically, so consecutive connections and successive
+        // attempts of one connection land on different carriers.
+        let worker_hint = (id as usize).wrapping_add(attempt);
+        if dispatcher
+            .send_proxy_open(pool, &frame, worker_hint)
+            .await
+            .is_ok()
+        {
+            let deadline =
+                (tokio::time::Instant::now() + OPEN_ATTEMPT_TIMEOUT).min(budget_deadline);
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Some(Inbound::Opened)) => return Ok((id, rx)),
+                Ok(Some(Inbound::Error(code))) => {
+                    last_error = if code == 0 { 1 } else { code };
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        // This carrier never confirmed the connect: drop the generation and
+        // keep the caller's connection alive for the next one.
+        streams.lock().await.remove(&id);
+        let _ = dispatcher
+            .send_proxy_frame(pool, &encode_frame(CLOSE, id, &[]))
+            .await;
+        attempt += 1;
+    }
+}
+
 async fn handle_client(
     mut socket: TcpStream,
-    stream_id: u64,
+    ids: Arc<AtomicU64>,
     dispatcher: Arc<Dispatcher>,
     pool: Arc<PacketPool>,
     streams: Arc<Mutex<HashMap<u64, mpsc::Sender<Inbound>>>>,
@@ -200,63 +285,92 @@ async fn handle_client(
 ) -> Result<()> {
     socket.set_nodelay(true)?;
     let target = read_handshake(&mut socket).await?;
-    let (tx, mut rx) = mpsc::channel(64);
-    streams.lock().await.insert(stream_id, tx);
     let started = tokio::time::Instant::now();
     let stats_arg = dispatcher.stats();
     let ibound0 = stats_arg.inbound_datagrams.load(Ordering::Relaxed);
     let obound0 = stats_arg.outbound_datagrams.load(Ordering::Relaxed);
     let (mut down_frames, mut down_bytes) = (0u64, 0u64);
-    let mut resends = 0u64;
+    let (mut resends, mut generations) = (0u64, 0u64);
+    let mut stream_id = 0u64;
     let result = async {
-        let open_frame = encode_frame(OPEN, stream_id, &target);
-        let spread_base = (stream_id & 0xffff) as usize;
-        let mut opened = None;
-        let mut attempt = 0u64;
-        let open_deadline = tokio::time::Instant::now() + Duration::from_secs(9);
-        while tokio::time::Instant::now() < open_deadline {
-            if let Err(error) = dispatcher
-                .send_proxy_open(&pool, &open_frame, spread_base.wrapping_add(attempt as usize))
-                .await
-            {
-                // No ready carrier: the listener must still answer. A bare
-                // close is indistinguishable from a network fault for the
-                // caller, which would then retry a proxy that is up.
-                crate::log_error!("[SOCKS5] Нет готового канала для CONNECT: {error:#}");
-                let _ = write_reply(&mut socket, 1).await;
-                bail!("no carrier available for SOCKS5 CONNECT");
+        let (opened_id, mut rx) = match open_tunnel(&target, &dispatcher, &pool, &streams, &ids)
+            .await
+        {
+            Ok(opened) => opened,
+            Err(code) => {
+                let _ = write_reply(&mut socket, code).await;
+                bail!("no carrier confirmed SOCKS5 CONNECT");
             }
-            match tokio::time::timeout(Duration::from_millis(2000), rx.recv()).await {
-                Ok(Some(Inbound::Opened)) => {
-                    opened = Some(Inbound::Opened);
-                    break;
-                }
-                Ok(Some(Inbound::Error(code))) => {
-                    opened = Some(Inbound::Error(code));
-                    break;
-                }
-                _ => attempt += 1,
-            }
-        }
-        match opened {
-            Some(Inbound::Opened) => write_reply(&mut socket, 0).await?,
-            Some(Inbound::Error(code)) => {
-                write_reply(&mut socket, code).await?;
-                bail!("remote SOCKS5 connect failed");
-            }
-            _ => {
-                write_reply(&mut socket, 4).await?;
-                bail!("remote SOCKS5 connect timed out");
-            }
-        }
+        };
+        stream_id = opened_id;
+        generations += 1;
+        // The remote connect succeeded, so the caller may send. Its first bytes
+        // stay parked until this carrier proves it can also deliver, which is
+        // what makes a later switch to another carrier replayable.
+        write_reply(&mut socket, 0).await?;
         let (mut reader, mut writer) = socket.into_split();
         let mut buffer = vec![0u8; MAX_DATA];
         let mut sent = StreamSequence::default();
         let mut received = crate::proxy_sequence::ReorderReceiver::default();
+        let mut unproven_up = Vec::new();
+        let mut proven = false;
+        let mut proof_deadline = tokio::time::Instant::now() + FIRST_DATA_TIMEOUT;
         let mut hole_deadline = None;
         let mut last_down_activity = tokio::time::Instant::now();
         let mut last_resend = None;
+        let mut switch = false;
         loop {
+            if switch {
+                // Move to a fresh carrier and replay the parked request. Done
+                // here rather than inside the select! body so the borrow on
+                // `rx` from the previous iteration has already ended.
+                switch = false;
+                if generations >= OPEN_ATTEMPTS as u64 {
+                    bail!("no carrier delivered payload for SOCKS5 stream");
+                }
+                crate::log_error!(
+                    "[SOCKS5] Поток #{stream_id} не получил данных, переключаюсь на другой канал"
+                );
+                streams.lock().await.remove(&stream_id);
+                let _ = dispatcher
+                    .send_proxy_frame(&pool, &encode_frame(CLOSE, stream_id, &[]))
+                    .await;
+                let (next_id, next_rx) =
+                    match open_tunnel(&target, &dispatcher, &pool, &streams, &ids).await
+                    {
+                    Ok(next) => next,
+                    Err(_) => bail!("no carrier left for SOCKS5 stream"),
+                };
+                generations += 1;
+                stream_id = next_id;
+                rx = next_rx;
+                sent = StreamSequence::default();
+                received = crate::proxy_sequence::ReorderReceiver::default();
+                hole_deadline = None;
+                last_resend = None;
+                last_down_activity = tokio::time::Instant::now();
+                proof_deadline = tokio::time::Instant::now() + FIRST_DATA_TIMEOUT;
+                // Replay the request that produced no answer on the dead
+                // carrier, so the new one has something to respond to. A
+                // non-idempotent request is never resent: the first copy may
+                // already have reached the target, and a silent duplicate POST
+                // is worse than a failed connection the caller can retry.
+                if !replayable(&unproven_up) {
+                    bail!("carrier died before answering a non-idempotent request");
+                }
+                let mut replay = std::mem::take(&mut unproven_up);
+                while !replay.is_empty() {
+                    let take = replay.len().min(MAX_DATA);
+                    let chunk = replay.drain(..take).collect::<Vec<u8>>();
+                    dispatcher
+                        .send_proxy_frame(
+                            &pool,
+                            &encode_frame(DATA, stream_id, &sent.encode(&chunk)?),
+                        )
+                        .await?;
+                }
+                continue;
+            }
             if received.is_waiting() {
                 if hole_deadline.is_none() {
                     hole_deadline = Some(tokio::time::Instant::now() + DATA_HOLE_PATIENCE);
@@ -284,7 +398,14 @@ async fn handle_client(
             } else {
                 hole_deadline = None;
             }
-            let quiet_due = last_down_activity + DATA_QUIET_TIMEOUT;
+            let quiet_due = if proven {
+                last_down_activity + DATA_QUIET_TIMEOUT
+            } else {
+                // Nothing has ever come back on this carrier. Give it a short,
+                // bounded grace period, then move to another one instead of
+                // holding the caller's connection open for a minute.
+                proof_deadline
+            };
             let due = match hole_deadline {
                 Some(hole_due) => quiet_due.min(hole_due),
                 None => quiet_due,
@@ -302,12 +423,32 @@ async fn handle_client(
                                 &pool,
                                 &encode_frame(DATA, stream_id, &sent.encode(&buffer[..length])?),
                             )
-                            .await?
+                            .await?;
+                        if !proven {
+                            // Keep a copy so a switch to another carrier can
+                            // replay the request that produced no answer. The
+                            // request must go out immediately: waiting for the
+                            // downlink to prove itself first would deadlock any
+                            // protocol where the caller speaks first.
+                            unproven_up.extend_from_slice(&buffer[..length]);
+                            if unproven_up.len() > UNPROVEN_UPLINK_CAP {
+                                bail!("caller sent {UNPROVEN_UPLINK_CAP}+ bytes with no downlink");
+                            }
+                        }
                     }
                 },
                 inbound = rx.recv() => match inbound {
                     Some(Inbound::Data(data)) => {
                         last_down_activity = tokio::time::Instant::now();
+                        if !proven {
+                            // This carrier carries payload: the parked copy has
+                            // served its purpose and must never be replayed.
+                            proven = true;
+                            unproven_up.clear();
+                            unproven_up.shrink_to_fit();
+                            hole_deadline = None;
+                            last_resend = None;
+                        }
                         if let Some(decoded) = received.push(&data)? {
                             down_frames += 1;
                             down_bytes += decoded.len() as u64;
@@ -323,6 +464,13 @@ async fn handle_client(
                     // tunnel went completely quiet for this stream. The leg is
                     // effectively dead: fail fast so the browser can retry on
                     // a healthy carrier instead of hanging on ERR/HTTP timeout.
+                    // Before the first payload arrives, a dead carrier is not
+                    // fatal: another one may still work, and the caller has not
+                    // seen anything yet, so the switch stays invisible.
+                    if !proven {
+                        switch = true;
+                        continue;
+                    }
                     bail!("proxy stream stalled: no downlink progress");
                 }
             }
@@ -330,7 +478,7 @@ async fn handle_client(
         Result::<()>::Ok(())
     }.await;
     eprintln!(
-        "[SXP] stream {stream_id} ended: down_frames={down_frames} down_bytes={down_bytes} resends={resends} ok={:?} dt={}ms ibound_delta={} obound_delta={}",
+        "[SXP] stream {stream_id} ended: down_frames={down_frames} down_bytes={down_bytes} resends={resends} generations={generations} ok={:?} dt={}ms ibound_delta={} obound_delta={}",
         result.is_ok(),
         started.elapsed().as_millis(),
         stats_arg
@@ -407,7 +555,7 @@ async fn write_reply(socket: &mut TcpStream, code: u8) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{
-        dispatcher::{WorkerChannels, packet_channel},
+        dispatcher::{PacketReceiver, WorkerChannels, packet_channel},
         stats::Stats,
     };
 
@@ -437,6 +585,23 @@ mod tests {
         let (kind, stream_id) = frame_route(&encoded).unwrap();
         assert_eq!(kind, RESEND);
         assert_eq!(stream_id, 7);
+    }
+
+    #[test]
+    fn only_idempotent_requests_may_be_replayed_on_another_carrier() {
+        assert!(replayable(b""));
+        assert!(replayable(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"));
+        assert!(replayable(b"HEAD /x HTTP/1.1\r\n\r\n"));
+        assert!(replayable(b"OPTIONS * HTTP/1.1\r\n\r\n"));
+        // A request that may already have reached the target must not be
+        // repeated behind the caller's back.
+        assert!(!replayable(b"POST /pay HTTP/1.1\r\n\r\n"));
+        assert!(!replayable(b"PUT /x HTTP/1.1\r\n\r\n"));
+        assert!(!replayable(b"PATCH /x HTTP/1.1\r\n\r\n"));
+        assert!(!replayable(b"DELETE /x HTTP/1.1\r\n\r\n"));
+        // Unknown protocol: refuse to guess.
+        assert!(!replayable(b"\x16\x03\x01\x02\x00"));
+        assert!(!replayable(b"garbage without a request line"));
     }
 
     #[tokio::test]
@@ -613,6 +778,146 @@ mod tests {
         let response = encode_frame(
             DATA,
             stream_id,
+            &StreamSequence::default().encode(b"world").unwrap(),
+        );
+        let mut packet = pool.acquire();
+        packet.set_read_len(response.len()).unwrap();
+        packet.as_mut_slice().copy_from_slice(&response);
+        dispatcher.return_packet(packet).await;
+        let mut body = [0u8; 5];
+        client.read_exact(&mut body).await.unwrap();
+        assert_eq!(&body, b"world");
+
+        cancel.cancel();
+        dispatcher.shutdown().await;
+        let _ = task.await;
+    }
+
+    /// Take the next frame the proxy stack emits on either carrier. Carrier
+    /// selection is an internal detail, so tests assert on the frame sequence
+    /// rather than on which worker happened to win the hint.
+    async fn next_frame(
+        first: &PacketReceiver,
+        second: &PacketReceiver,
+        cancel: &CancellationToken,
+    ) -> (u8, u64, Vec<u8>) {
+        let packet = tokio::select! {
+            biased;
+            packet = first.recv(cancel) => packet,
+            packet = second.recv(cancel) => packet,
+        }
+        .expect("carrier channel closed");
+        let frame = parse_frame(packet.as_slice()).unwrap();
+        (frame.kind, frame.stream_id, frame.payload.to_vec())
+    }
+
+    #[tokio::test]
+    async fn dead_first_carrier_is_replaced_and_the_request_is_replayed() {
+        let pool = PacketPool::new(64);
+        let cancel = CancellationToken::new();
+        let (dispatcher, _) = Dispatcher::start(
+            "127.0.0.1:0",
+            None,
+            pool.clone(),
+            Arc::new(Stats::default()),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        let (latency, _latency_rx) = packet_channel(8, true);
+        let (priority, priority_rx) = packet_channel(16, true);
+        let (bulk, _bulk_rx) = packet_channel(8, true);
+        dispatcher.register(WorkerChannels {
+            id: 1,
+            incarnation_id: 1,
+            turn_path: Arc::from("test"),
+            latency,
+            priority,
+            bulk,
+        });
+        let (latency, _latency_rx2) = packet_channel(8, true);
+        let (priority, priority_rx2) = packet_channel(16, true);
+        let (bulk, _bulk_rx2) = packet_channel(8, true);
+        dispatcher.register(WorkerChannels {
+            id: 0,
+            incarnation_id: 2,
+            turn_path: Arc::from("test"),
+            latency,
+            priority,
+            bulk,
+        });
+        let (address, task) = start(
+            "127.0.0.1:0",
+            DEFAULT_MAX_STREAMS,
+            dispatcher.clone(),
+            pool.clone(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut method = [0u8; 2];
+        client.read_exact(&mut method).await.unwrap();
+        client.write_all(&[5, 1, 0, 3, 11]).await.unwrap();
+        client.write_all(b"example.com").await.unwrap();
+        client.write_all(&443u16.to_be_bytes()).await.unwrap();
+
+        let (kind, dead_stream, payload) = next_frame(&priority_rx, &priority_rx2, &cancel).await;
+        assert_eq!(kind, OPEN);
+        assert_eq!(payload[0], 3);
+        assert_eq!(&payload[2..2 + 11], b"example.com");
+
+        // The server confirms the connect, so the caller is told the tunnel is
+        // good and sends its request.
+        let opened = encode_frame(OPEN_OK, dead_stream, &[]);
+        let mut packet = pool.acquire();
+        packet.set_read_len(opened.len()).unwrap();
+        packet.as_mut_slice().copy_from_slice(&opened);
+        dispatcher.return_packet(packet).await;
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], 0);
+
+        client.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+        let (kind, stream, payload) = next_frame(&priority_rx, &priority_rx2, &cancel).await;
+        assert_eq!(kind, DATA);
+        assert_eq!(stream, dead_stream);
+        assert_eq!(&payload[8..], b"GET / HTTP/1.1\r\n");
+
+        // This carrier confirms the connect but never delivers the answer. The
+        // caller must not see a failure: the stream is retired and a fresh one
+        // carries the same request.
+        // The two frames race across carriers, so assert on the set: the dead
+        // stream is retired and a replacement one is opened.
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(next_frame(&priority_rx, &priority_rx2, &cancel).await);
+        }
+        assert!(
+            seen.contains(&(CLOSE, dead_stream, Vec::new())),
+            "dead stream must be retired: {seen:?}"
+        );
+        let live_stream = seen
+            .iter()
+            .find(|frame| frame.0 == OPEN)
+            .map(|frame| frame.1)
+            .expect("replacement stream must be opened");
+        assert_ne!(live_stream, dead_stream);
+
+        let opened = encode_frame(OPEN_OK, live_stream, &[]);
+        let mut packet = pool.acquire();
+        packet.set_read_len(opened.len()).unwrap();
+        packet.as_mut_slice().copy_from_slice(&opened);
+        dispatcher.return_packet(packet).await;
+        let (kind, stream, payload) = next_frame(&priority_rx, &priority_rx2, &cancel).await;
+        assert_eq!(kind, DATA);
+        assert_eq!(stream, live_stream);
+        assert_eq!(&payload[8..], b"GET / HTTP/1.1\r\n");
+
+        let response = encode_frame(
+            DATA,
+            live_stream,
             &StreamSequence::default().encode(b"world").unwrap(),
         );
         let mut packet = pool.acquire();
