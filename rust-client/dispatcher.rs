@@ -3,7 +3,7 @@
 
 use crate::{
     client_perf::{self, Stage as PerfStage},
-    packet::{PacketBuf, PacketPool},
+    packet::{PacketBuf, PacketPool, is_ip_packet},
     stats::Stats,
     striped_scheduler::{DispatchTicket, PacketClass, StripedScheduler, packet_class},
     tun, udp_batch,
@@ -311,6 +311,7 @@ pub struct Dispatcher {
     proxy_frames: OnceLock<tokio::sync::mpsc::Sender<Vec<u8>>>,
     proxy_abort: OnceLock<tokio::sync::mpsc::Sender<u64>>,
     proxy_routes: Mutex<HashMap<u64, (usize, u64)>>,
+    dropped_return_packets: AtomicU64,
 }
 
 impl Dispatcher {
@@ -339,6 +340,7 @@ impl Dispatcher {
             proxy_frames: OnceLock::new(),
             proxy_abort: OnceLock::new(),
             proxy_routes: Mutex::new(HashMap::new()),
+            dropped_return_packets: AtomicU64::new(0),
         });
         if let Some(source) = tun_source {
             crate::log_error!("[КЛИЕНТ] Запуск источника {}...", source.description());
@@ -379,6 +381,11 @@ impl Dispatcher {
                     return_latency_rx.suspend();
                     return_priority_rx.suspend();
                     return_rx.suspend();
+                    // open() для TUN-устройства не ждёт и не видит отмену: без
+                    // выхода цикл вечно пересоздаёт интерфейс после остановки.
+                    if io_dispatcher.cancel.is_cancelled() {
+                        return;
+                    }
                 }
             });
             dispatcher.tasks.lock().await.push(io_task);
@@ -508,6 +515,10 @@ impl Dispatcher {
             }
             return;
         }
+        if !is_ip_packet(packet.as_slice()) {
+            self.log_dropped_return_packet("не-IP или усечённый пакет");
+            return;
+        }
         client_perf::measure_sampled(PerfStage::ReaderReturn, 64, || {
             let sender = match packet_class(packet.as_slice()) {
                 PacketClass::Latency => &self.return_latency_tx,
@@ -516,6 +527,13 @@ impl Dispatcher {
             };
             let _ = sender.force_send(packet);
         });
+    }
+
+    fn log_dropped_return_packet(&self, reason: &str) {
+        let count = self.dropped_return_packets.fetch_add(1, Ordering::Relaxed) + 1;
+        if count <= 8 || count.is_multiple_of(1000) {
+            crate::log_error!("[TUN] Пакет #{count} отброшен: {reason}");
+        }
     }
 
     pub fn set_proxy_frame_sender(&self, sender: tokio::sync::mpsc::Sender<Vec<u8>>) -> Result<()> {
@@ -929,6 +947,10 @@ impl Dispatcher {
     ) -> bool {
         use std::os::fd::AsRawFd;
 
+        if !is_ip_packet(packet.as_slice()) {
+            self.log_dropped_return_packet("не-IP или усечённый пакет перед записью");
+            return true;
+        }
         let mut written = 0;
         while written < packet.len() {
             let readiness = tokio::select! {
@@ -961,8 +983,8 @@ impl Dispatcher {
             });
             match result {
                 Ok(Ok(0)) => {
-                    crate::log_error!("[ОШИБКА] Запись TUN вернула 0 байт");
-                    return false;
+                    self.log_dropped_return_packet("запись TUN вернула 0 байт");
+                    return true;
                 }
                 Ok(Ok(length)) => written += length,
                 Ok(Err(error)) if is_retryable_tun_error(&error) => {
@@ -977,6 +999,10 @@ impl Dispatcher {
                     } else {
                         tokio::task::yield_now().await;
                     }
+                }
+                Ok(Err(error)) if is_rejected_tun_packet(&error) => {
+                    self.log_dropped_return_packet(&error.to_string());
+                    return true;
                 }
                 Ok(Err(error)) if is_closed_tun_error(&error) => {
                     crate::log_error!("[TUN] Интерфейс закрыт, ожидаем новый FD");
@@ -1161,6 +1187,14 @@ where
 }
 
 #[cfg(unix)]
+fn is_rejected_tun_packet(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EINVAL) | Some(libc::EMSGSIZE)
+    )
+}
+
+#[cfg(unix)]
 fn is_closed_tun_error(error: &std::io::Error) -> bool {
     matches!(
         error.raw_os_error(),
@@ -1282,6 +1316,7 @@ mod tests {
                 proxy_frames: OnceLock::new(),
                 proxy_abort: OnceLock::new(),
                 proxy_routes: Mutex::new(HashMap::new()),
+                dropped_return_packets: AtomicU64::new(0),
             }),
             return_latency_rx,
             return_priority_rx,
@@ -1902,6 +1937,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn return_filter_preserves_proxy_frames_and_valid_ip_after_control_noise() {
+        let (dispatcher, latency, _priority, _bulk) = test_dispatcher();
+        let pool = PacketPool::new(8);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        dispatcher.set_proxy_frame_sender(tx).unwrap();
+        let mut frame = b"CSQPX2".to_vec();
+        frame.resize(15, 0);
+        let mut ip = vec![0; 20];
+        ip[0] = 0x45;
+        ip[3] = 20;
+        ip[9] = 1;
+        for bytes in [vec![0xff], frame.clone(), ip.clone()] {
+            let mut packet = pool.acquire();
+            packet.set_read_len(bytes.len()).unwrap();
+            packet.as_mut_slice().copy_from_slice(&bytes);
+            dispatcher.return_packet(packet).await;
+        }
+        assert_eq!(rx.try_recv().unwrap(), frame);
+        let packet = tokio::time::timeout(Duration::from_secs(1), latency.recv(&dispatcher.cancel))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(packet.as_slice(), ip);
+        assert!(!dispatcher.cancel.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tun_writer_survives_invalid_packet_then_writes_valid_ip() {
+        use std::os::fd::OwnedFd;
+        let (dispatcher, _, _, _) = test_dispatcher();
+        let pool = PacketPool::new(4);
+        let stats = Stats::default();
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::FromRawFd;
+            // eventfd rejects a 20-byte write with real EINVAL, without creating a TUN.
+            let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+            assert!(fd >= 0);
+            let rejected =
+                Arc::new(tokio::io::unix::AsyncFd::new(unsafe { File::from_raw_fd(fd) }).unwrap());
+            let mut packet = pool.acquire();
+            packet.set_read_len(20).unwrap();
+            packet.as_mut_slice().fill(0);
+            packet.as_mut_slice()[0] = 0x45;
+            packet.as_mut_slice()[3] = 20;
+            assert!(dispatcher.write_tun_packet(&rejected, &stats, packet).await);
+            assert_eq!(stats.total_bytes_down.load(Ordering::Relaxed), 0);
+            assert!(!dispatcher.cancel.is_cancelled());
+        }
+        let (writer, reader) = std::os::unix::net::UnixDatagram::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        reader.set_nonblocking(true).unwrap();
+        let device =
+            Arc::new(tokio::io::unix::AsyncFd::new(File::from(OwnedFd::from(writer))).unwrap());
+        let reader = tokio::net::UnixDatagram::from_std(reader).unwrap();
+        for bytes in [vec![0xff], {
+            let mut ip = vec![0; 20];
+            ip[0] = 0x45;
+            ip[3] = 20;
+            ip
+        }] {
+            let mut packet = pool.acquire();
+            packet.set_read_len(bytes.len()).unwrap();
+            packet.as_mut_slice().copy_from_slice(&bytes);
+            assert!(dispatcher.write_tun_packet(&device, &stats, packet).await);
+        }
+        let mut bytes = [0; 64];
+        let len = tokio::time::timeout(Duration::from_secs(1), reader.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 20);
+        assert_eq!(bytes[0], 0x45);
+        assert_eq!(stats.total_bytes_down.load(Ordering::Relaxed), 20);
+        assert!(is_rejected_tun_packet(&std::io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+        assert!(!is_rejected_tun_packet(&std::io::Error::from_raw_os_error(
+            libc::EBADF
+        )));
+        assert!(!is_rejected_tun_packet(&std::io::Error::from_raw_os_error(
+            libc::EPERM
+        )));
+    }
+
+    #[tokio::test]
     async fn direct_udp_batches_preserve_idle_pool_and_fifo_order() {
         let pool = PacketPool::new(128);
         let stats = Arc::new(Stats::default());
@@ -1939,11 +2061,14 @@ mod tests {
 
         for expected in 0..udp_batch::MAX_DATAGRAMS {
             let mut packet = pool.acquire();
-            packet.set_read_len(1).unwrap();
-            packet.as_mut_slice()[0] = expected as u8 + 0x80;
+            packet.set_read_len(21).unwrap();
+            packet.as_mut_slice().fill(0);
+            packet.as_mut_slice()[0] = 0x45;
+            packet.as_mut_slice()[3] = 21;
+            packet.as_mut_slice()[20] = expected as u8 + 0x80;
             dispatcher.return_packet(packet).await;
         }
-        let mut buffer = [0u8; 8];
+        let mut buffer = [0u8; 64];
         for expected in 0..udp_batch::MAX_DATAGRAMS {
             let (length, source) =
                 tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
@@ -1951,7 +2076,8 @@ mod tests {
                     .expect("direct UDP return packet timed out")
                     .unwrap();
             assert_eq!(source, destination);
-            assert_eq!(&buffer[..length], &[expected as u8 + 0x80]);
+            assert_eq!(length, 21);
+            assert_eq!(buffer[20], expected as u8 + 0x80);
         }
 
         dispatcher.shutdown().await;

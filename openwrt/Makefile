@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=csqtt-client
-PKG_VERSION:=2.1.14
-PKG_RELEASE:=6
+PKG_VERSION:=2.1.16
+PKG_RELEASE:=1
 
 include $(INCLUDE_DIR)/package.mk
 
