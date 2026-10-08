@@ -291,7 +291,7 @@ return L.view.extend({
                 logWrap,
                 E('div', { class: 'csqtt-footer' }, [
                     E('span', { class: 'csqtt-footerver' },
-                        'Версия панели: 2.1.14-r5 · ver 25.12')
+                        'Версия панели: 2.1.16 · ver 25.12')
                 ])
             ]);
         });
