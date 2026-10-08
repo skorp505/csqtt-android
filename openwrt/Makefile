@@ -11,7 +11,7 @@ define Package/csqtt-client
   CATEGORY:=Network
   TITLE:=CSQTT client for OpenWrt routers
   URL:=https://github.com/danusha2345/csqtt-android
-  DEPENDS:=+libc +kmod-tun +ip-full +iptables-nft
+  DEPENDS:=+libc +kmod-tun +ip-full +iptables-nft +nftables
 endef
 
 define Package/csqtt-client/description
