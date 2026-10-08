@@ -97,7 +97,6 @@ get_client_name() {
     # имя файла клиента для (apk|ipk, arch, version, release-suffix)
     local kind="$1" arch="$2" ver="$3" rel="$4"
     if [ "$kind" = "apk" ]; then
-        # For OpenWrt 25.12 (apk-tools) use .ipk packages if native .apk not available
         case "$arch" in
             aarch64_cortex-a53) echo "csqtt-client_${ver}_aarch64_cortex-a53.apk" ;;
             aarch64_generic) echo "csqtt-client_${ver}_aarch64_generic.apk" ;;
@@ -114,7 +113,7 @@ get_client_name() {
 get_panel_name() {
     local ver="$1"
     if [ "$PKG_IS_APK" -eq 1 ]; then
-        echo "luci-app-csqtt_${ver}_all.ipk"
+        echo "luci-app-csqtt_${ver}_all.apk"
     else
         echo "luci-app-csqtt_${ver}_all.ipk"
     fi
