@@ -99,7 +99,7 @@ get_client_name() {
     if [ "$kind" = "apk" ]; then
         # For OpenWrt 25.12 (apk-tools) use .ipk packages if native .apk not available
         case "$arch" in
-            aarch64_cortex-a53) echo "csqtt-client_${ver}_aarch64_cortex-a53.ipk" ;;
+            aarch64_cortex-a53) echo "csqtt-client_${ver}_aarch64_generic.ipk" ;;
             aarch64_generic) echo "csqtt-client_${ver}_aarch64_generic.ipk" ;;
             *) echo "" ;;
         esac
