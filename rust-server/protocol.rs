@@ -41,10 +41,13 @@ type Aes128CtrCore = ctr::CtrCore<aes::Aes128, ctr::flavors::Ctr128BE>;
 
 pub(crate) const MAX_ACTIVE_SESSIONS: usize = 3072;
 
-/// Extra on-the-wire copies sent for proxied DATA frames server-side.
-/// Tolerant clients drop duplicates; this survives narrow relay gaps
-/// (1 extra copy in the future_data relay-loss fix proved insufficient).
-const PROXY_DATA_REDUNDANCY: usize = 3;
+/// Extra on-the-wire copies for a frame that selective FEC considers
+/// worthwhile, proxied DATA included. Copies are never sent unconditionally:
+/// every one of them spends a `fec_budget` token, so a saturated downlink pays
+/// 1x instead of 4x. Loss recovery stays with the RESEND replay window, which
+/// retransmits the exact missing suffix instead of flooding the link with
+/// copies of bytes the receiver already has.
+const FEC_EXTRA_COPIES: usize = 1;
 const CONTROL_EVENT_CAPACITY: usize = 1024;
 const CONTROL_TASK_CAPACITY: usize = 128;
 const DB_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -3511,6 +3514,28 @@ fn send_plain_mode(
     send_legacy_plain(session, plain, rng, sink, profiler, batch_now, mode)
 }
 
+/// How many extra copies of `plain` go on the wire.
+///
+/// Proxied DATA is eligible here exactly like control or DNS traffic: the
+/// budget is spent only on frames the receiver may actually need a second copy
+/// of, so a busy downlink degrades to single-send instead of quadrupling.
+fn duplication_copies(
+    plain: &[u8],
+    profile: FecProfile,
+    budget: &mut selective_fec::Budget,
+) -> usize {
+    if profile != FecProfile::Safe {
+        return 0;
+    }
+    let eligible =
+        selective_fec::is_server_duplicable_frame(plain) || selective_fec::should_duplicate(plain);
+    if eligible && budget.allow() {
+        FEC_EXTRA_COPIES
+    } else {
+        0
+    }
+}
+
 fn send_legacy_plain(
     session: &mut HotSession,
     plain: &[u8],
@@ -3522,17 +3547,7 @@ fn send_legacy_plain(
 ) -> bool {
     let peer = session.peer;
     let local_ip = session.local_ip;
-    let proxy = selective_fec::is_server_duplicable_frame(plain);
-    let extra_copies = if proxy {
-        PROXY_DATA_REDUNDANCY
-    } else if session.fec_profile == FecProfile::Safe
-        && selective_fec::should_duplicate(plain)
-        && session.fec_budget.allow()
-    {
-        1
-    } else {
-        0
-    };
+    let extra_copies = duplication_copies(plain, session.fec_profile, &mut session.fec_budget);
     let mut wire_len = 0usize;
     let kind = if session.is_srtp {
         CryptoKind::Srtp
@@ -5290,6 +5305,54 @@ mod tests {
     fn fec_profile_is_safe_by_default_and_can_be_disabled() {
         assert_eq!(FecProfile::default(), FecProfile::Safe);
         assert_ne!(FecProfile::Off, FecProfile::Safe);
+    }
+
+    #[test]
+    fn proxy_data_duplication_is_budget_bounded() {
+        let data = b"CSQPX2\x04\0\0\0\0\0\0\0\x01payload";
+        let mut budget = selective_fec::Budget::new();
+        assert_eq!(duplication_copies(data, FecProfile::Safe, &mut budget), 1);
+        // A saturated downlink must not quadruple the wire: after the initial
+        // burst the rest goes out single-send.
+        let mut copies = 0;
+        for _ in 0..64 {
+            copies += duplication_copies(data, FecProfile::Safe, &mut budget);
+        }
+        assert!(copies <= 16, "duplication escaped the budget: {copies}");
+    }
+
+    #[test]
+    fn non_duplicable_frames_do_not_spend_the_budget() {
+        // IPv4/UDP, neither port is 53 and the payload is well over
+        // MAX_SMALL_UDP_PAYLOAD: never duplicated, so it must leave the budget alone.
+        let mut large_udp = vec![0x45, 0x02, 0x64, 0, 0, 0, 0, 0, 64, 17, 0, 0];
+        large_udp.resize(612, 0);
+        let mut budget = selective_fec::Budget::new();
+        for _ in 0..32 {
+            assert_eq!(
+                duplication_copies(&large_udp, FecProfile::Safe, &mut budget),
+                0
+            );
+        }
+        // The burst is still full, so the first proxy DATA frame still rides along.
+        assert_eq!(
+            duplication_copies(
+                b"CSQPX2\x04\0\0\0\0\0\0\0\x01data",
+                FecProfile::Safe,
+                &mut budget
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn fec_off_sends_nothing_and_keeps_the_budget_intact() {
+        let data = b"CSQPX2\x04\0\0\0\0\0\0\0\x01payload";
+        let mut budget = selective_fec::Budget::new();
+        for _ in 0..32 {
+            assert_eq!(duplication_copies(data, FecProfile::Off, &mut budget), 0);
+        }
+        assert_eq!(duplication_copies(data, FecProfile::Safe, &mut budget), 1);
     }
 
     #[test]
