@@ -18,7 +18,7 @@ test -d "$luci_dir/files"
 mkdir -p "$work_dir/control" "$work_dir/data" "$output_dir"
 
 cp -a "$luci_dir/files/root/." "$work_dir/data/"
-cp -a "$luci_dir/files/htdocs/." "$work_dir/data/htdocs/"
+cp -a "$luci_dir/files/htdocs/." "$work_dir/data/www/"
 
 installed_size=$(du -k -s "$work_dir/data" | awk '{print $1}')
 cat >"$work_dir/control/control" <<EOF
